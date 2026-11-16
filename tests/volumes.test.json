@@ -1,0 +1,31 @@
+{
+    "volumes": [
+        {
+            "name": "throwaway-ntfs",
+            "display_name": "Throwaway NTFS (test only)",
+            "file": "/mnt/user/data/veracrypt/throwaway-ntfs"
+        },
+        {
+            "name": "undo-test",
+            "display_name": "Undo test (same throwaway file, mount folder cannot be created)",
+            "file": "/mnt/user/data/veracrypt/throwaway-ntfs",
+            "mount_at": "/mnt/addons/vcm-test-blocker/inside"
+        },
+        {
+            "name": "share-test",
+            "display_name": "Share test (same throwaway file, read-write share for @TEST_USER@)",
+            "file": "/mnt/user/data/veracrypt/throwaway-ntfs",
+            "share": { "users": { "@TEST_USER@": "read-write" } }
+        },
+        {
+            "name": "deps-test",
+            "display_name": "Dependents test (same throwaway file, three dependents, one of them missing)",
+            "file": "/mnt/user/data/veracrypt/throwaway-ntfs",
+            "dependents": [
+                { "container": "vcm-test-good", "grace": 5 },
+                { "container": "vcm-test-missing", "grace": 5 },
+                { "container": "vcm-test-stubborn", "grace": 5 }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,24 @@
+# Secrets: test credentials for throwaway volumes. Never commit these.
+.secrets/
+
+# Build output
+build/
+*.txz
+*.tgz
+
+# Claude Code personal settings
+.claude/settings.local.json
+
+# Windows clutter
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Editor clutter
+.vscode/
+.idea/
+*.swp
+*~
+
+# Personal instructions for Claude Code (owner only, see CLAUDE.md)
+CLAUDE.local.md

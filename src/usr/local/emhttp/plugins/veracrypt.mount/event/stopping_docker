@@ -1,0 +1,61 @@
+#!/bin/bash
+# stopping_docker: stop the dependents of every mounted volume before Unraid
+# stops Docker (LIFE-1).
+#
+# Unraid runs this file when the array stops, just before it stops all
+# containers itself. Unraid gives every container the same short time (10
+# seconds unless set otherwise) and then kills it. Stopping the dependents
+# here first gives each of them its own grace period (DOC-4). One that has not
+# stopped by then is killed (DOC-5).
+#
+# It contains no logic of its own. It calls the engine:
+# vcmount stop-dependents --all. The volumes stay mounted; the hook
+# unmounting_disks dismounts them later in the array stop.
+#
+# The time limit: Unraid waits until this file has finished, and at shutdown
+# and reboot the whole array stop must fit into Unraid's "shutdown time-out".
+# This hook therefore takes at most half of that time-out, and never less than
+# 20 seconds. Dependents that are still running after that are stopped by
+# Unraid together with all other containers.
+
+VCMOUNT="$(dirname "$0")/../scripts/vcmount"
+# dev-only-begin (scripts/build.py leaves this out of the package)
+# Development only: if a file volumes.dev.json lies next to the engine, the
+# engine reads it instead of the configuration on the flash drive. The package
+# never contains that file; scripts/deployhook.sh puts it there for tests.
+DEV_CONFIG="$(dirname "$0")/../scripts/volumes.dev.json"
+[ -f "$DEV_CONFIG" ] && export VCMOUNT_CONFIG="$DEV_CONFIG"
+# dev-only-end
+VAR_INI=/var/local/emhttp/var.ini
+WAIT=5   # seconds between tries while another vcmount action is running
+
+say() { logger -t veracrypt.mount "array stop: $*"; }
+
+# Unraid's shutdown time-out in seconds; 90 if it cannot be read.
+shutdown_timeout=$(sed -n 's/^shutdownTimeout="\{0,1\}\([0-9]\{1,5\}\)"\{0,1\}[[:space:]]*$/\1/p' "$VAR_INI" 2> /dev/null | head -n 1)
+shutdown_timeout=${shutdown_timeout:-90}
+budget=$((shutdown_timeout / 2))
+[ "$budget" -ge 20 ] || budget=20
+
+SECONDS=0   # bash counts the seconds since this line by itself
+code=0
+while :; do
+    left=$((budget - SECONDS))
+    [ "$left" -gt 0 ] || break
+    timeout "$left" "$VCMOUNT" stop-dependents --all < /dev/null > /dev/null 2>&1
+    code=$?
+    # Code 6: another vcmount action is still running. Wait and try again.
+    [ "$code" -eq 6 ] || break
+    sleep "$WAIT"
+done
+
+case "$code" in
+    0) ;;
+    5) say "not every dependent could be stopped; Unraid stops the rest" ;;
+    6) say "another vcmount action was still running; dependents were not stopped" ;;
+    124) say "stopping the dependents took longer than $budget seconds and was cut short; Unraid stops the rest" ;;
+    *) say "vcmount ended with code $code" ;;
+esac
+
+# Always report success: Unraid's array stop does not depend on this result.
+exit 0

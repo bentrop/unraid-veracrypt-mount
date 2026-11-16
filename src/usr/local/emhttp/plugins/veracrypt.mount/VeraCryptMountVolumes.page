@@ -1,0 +1,146 @@
+Menu="VeraCryptMount:1"
+Title="Volumes"
+Tag="lock"
+Markdown="false"
+---
+<?php
+/*
+ * The volume list (UI-3), first tab of Settings > User Utilities > VeraCrypt Mount.
+ * The page holds no mount logic. Everything goes through include/action.php,
+ * which starts the engine. Built from mockups/index.html (screens s-list,
+ * s-edit, s-mount, s-unsaved, s-busy).
+ */
+$vcm = '/plugins/veracrypt.mount';
+?>
+<link type="text/css" rel="stylesheet" href="<?php autov('/webGui/styles/jquery.filetree.css') ?>">
+<link type="text/css" rel="stylesheet" href="<?php autov("$vcm/css/vcmount.css") ?>">
+
+<!-- Unraid draws no title bar above a page shown as a tab (MainContentTabbed.php),
+     so each tab draws its own, written as Unraid's tab_title() writes it. The
+     edit panel puts its breadcrumb into this bar (setCrumb in js/vcmount.js). -->
+<div class="title">
+  <span class="left inline-flex flex-row items-center gap-1"><i class="fa fa-lock title"></i>Volumes</span>
+  <span class="right inline-flex flex-row items-center gap-1"></span>
+</div>
+
+<div id="vcm-http-warning" class="vcm-warning" hidden>
+  This page was opened over plain HTTP. A password typed here travels unencrypted
+  over your network. Open the page over HTTPS, or unlock over SSH with <code>vcmount</code>.
+</div>
+
+<!-- PRIV-3: shown while File Activity is installed and lacks exclusions for
+     the volumes. Filled by js/vcmount.js from "vcmount privacy". -->
+<div id="vcm-privacy" class="vcm-warning" hidden>
+  <p><strong>File Activity can record the names of the files on your volumes.</strong>
+     It is installed and does not yet leave out <span id="vcm-privacy-folders"></span>.
+     Add the line below as <strong>one</strong> exclusion under
+     <a href="/Tools/FileActivity">Tools &rsaquo; File Activity</a>, tab Settings. It covers
+     every volume, so it can replace exclusions you added for them before.
+     This warning goes away once File Activity leaves out every folder.</p>
+  <input type="text" id="vcm-privacy-line" class="vcm-privacy-line" readonly spellcheck="false">
+  <input type="button" id="vcm-privacy-copy" value="Copy">
+  <span id="vcm-privacy-copied" class="vcm-note" hidden>Copied.</span>
+</div>
+
+<!-- The volume list -->
+<div id="vcm-list">
+  <!-- Unraid's table style with five columns of two lines each (main fact,
+       then details). Rows come from js/vcmount.js (volumeRow). -->
+  <table class="unraid disk_status vcm-manage">
+    <thead>
+      <tr><td>Volume</td><td>Share</td><td>Dependents</td><td>Usage</td><td></td></tr>
+    </thead>
+    <tbody id="vcm-rows">
+      <tr><td colspan="10" class="vcm-empty">Loading&hellip;</td></tr>
+    </tbody>
+  </table>
+
+  <div class="vcm-buttons">
+    <input type="button" id="vcm-add" value="Add volume">
+    <input type="button" id="vcm-mount-all" value="Mount all">
+    <input type="button" id="vcm-dismount-all" value="Dismount all">
+    <input type="button" id="vcm-once" value="Mount a file once">
+  </div>
+</div>
+
+<!-- Add / edit a volume (screen s-edit). Only name and file are always
+     visible; the boxes below are folded and show their setting on the right.
+     Features that are not built yet (keyfiles, automount, hidden volumes,
+     lock when idle, Compose stacks) are left out until they exist. -->
+<div id="vcm-edit" hidden>
+  <!-- Used only when Unraid shows no title bar above the page (tabs). -->
+  <nav class="vcm-crumb" id="vcm-crumb" hidden></nav>
+  <h3 id="vcm-edit-title">Add volume</h3>
+  <form id="vcm-edit-form" autocomplete="off" onsubmit="return false">
+    <dl class="vcm-form">
+      <dt>Name</dt>
+      <dd><input type="text" id="e-name" maxlength="32" spellcheck="false" autocomplete="off">
+          <span class="vcm-note">Letters, digits, - and _. Used for the mount folder and the share name.</span></dd>
+      <dt>Volume file</dt>
+      <dd><input type="text" id="e-file" spellcheck="false" autocomplete="off" placeholder="/mnt/user/..."
+                 data-pickroot="/mnt/" data-pickcloseonfile="true">
+          <span class="vcm-note">When the name is empty, it is filled from the file name.</span></dd>
+      <dt>Mount read-only</dt>
+      <dd><label class="vcm-check"><input type="checkbox" id="e-ro"> The files on the volume stay untouched. Nothing can change, add or delete them, here or over the network.</label></dd>
+    </dl>
+    <p class="vcm-note">A new volume needs only a name and a file. Everything else starts with a safe default.</p>
+
+    <details class="vcm-fold">
+      <summary>Network share <span class="vcm-sum" id="s-share"></span></summary>
+      <dl class="vcm-form">
+        <dt>Share over the network (SMB)</dt>
+        <dd><select id="e-share"><option value="no">No</option><option value="yes">Yes</option></select></dd>
+        <dt class="vcm-share-on">Export</dt>
+        <dd class="vcm-share-on"><select id="e-export"><option value="yes">Yes</option><option value="hidden">Yes (hidden)</option></select></dd>
+      </dl>
+      <table class="vcm-access vcm-share-on">
+        <thead><tr><th>User</th><th>Access</th></tr></thead>
+        <tbody id="e-users"></tbody>
+      </table>
+      <p class="vcm-note" id="e-ro-note" style="display:none">The volume is mounted read-only, so every user can at most read. The access set here is kept and applies again when you untick read-only.</p>
+      <p class="vcm-note vcm-share-on">Only users given access can connect. Guests never can, as with Unraid's "Private" share security.</p>
+    </details>
+
+    <details class="vcm-fold">
+      <summary>Dependents <span class="vcm-sum" id="s-deps"></span></summary>
+      <p class="vcm-note">Containers that run only while this volume is mounted. Started top to bottom,
+         stopped bottom to top. Drag to reorder.</p>
+      <ul id="e-deps" class="vcm-deps"></ul>
+      <div class="vcm-buttons">
+        <select id="e-dep-choice"></select>
+        <input type="button" id="e-dep-add" value="Add dependent">
+      </div>
+    </details>
+
+    <details class="vcm-fold">
+      <summary>Advanced <span class="vcm-sum" id="s-adv"></span></summary>
+      <dl class="vcm-form">
+        <dt>Display name</dt>
+        <dd><input type="text" id="e-display" maxlength="100" autocomplete="off" placeholder="same as the name"></dd>
+        <dt>Mount at</dt>
+        <dd><select id="e-mount-mode"><option value="own">Own mount point</option><option value="share">A folder inside a share</option></select>
+            <span class="vcm-note" id="e-own-point"></span></dd>
+        <dt class="vcm-mount-share">Folder</dt>
+        <dd class="vcm-mount-share"><input type="text" id="e-mount-at" spellcheck="false" autocomplete="off"
+               placeholder="/mnt/user/share/folder" data-pickroot="/mnt/user/" data-pickfolders="true"
+               data-pickfilter="HIDE_FILES_FILTER"></dd>
+      </dl>
+      <p class="vcm-warning vcm-mount-share">Everything that walks this share (backups, indexers, activity
+         loggers) then also walks into the decrypted data. The mount is not visible through per-disk paths.</p>
+    </details>
+
+    <p id="vcm-edit-error" class="vcm-error" hidden></p>
+    <p class="vcm-note">Changes to a mounted volume take effect at its next mount.</p>
+    <div class="vcm-buttons">
+      <input type="button" id="e-add" class="lock" value="Add Volume">
+      <input type="button" id="e-apply" class="lock" value="Apply" disabled>
+      <input type="button" id="e-done" class="lock" value="Done">
+      <input type="button" id="e-remove" value="Remove from list">
+    </div>
+  </form>
+</div>
+
+<?php include '/usr/local/emhttp/plugins/veracrypt.mount/include/dialog.php'; ?>
+
+<script src="<?php autov('/webGui/javascript/jquery.filetree.js') ?>" charset="utf-8"></script>
+<script src="<?php autov("$vcm/js/vcmount.js") ?>"></script>

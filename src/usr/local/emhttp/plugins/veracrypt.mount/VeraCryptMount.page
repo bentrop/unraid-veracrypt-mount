@@ -1,0 +1,7 @@
+Menu="Utilities"
+Type="xmenu"
+Title="VeraCrypt Mount"
+Icon="<svg class='PanelIcon' width='33' height='33' viewBox='3.5 3 25 26' style='vertical-align:top' fill='none' stroke='currentColor' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M10 13V10a6 6 0 0 1 12 0v3'/><rect x='5' y='13' width='22' height='15' rx='2'/><path d='M9 17.5l3 6.5 3-6.5'/><path d='M23 18.6a3.6 3.6 0 1 0 0 4.3'/></svg>"
+Tabs="true"
+Markdown="false"
+---

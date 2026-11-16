@@ -1,0 +1,54 @@
+Cond="version_compare(parse_ini_file('/etc/unraid-version')['version'],'6.11.9','>')"
+Menu="Dashboard:0"
+Markdown="false"
+---
+<?php
+/*
+ * The Dashboard tile (UI-2), laid out like Unraid's Array tile: one row per
+ * volume with its name (a link to its Edit screen), whether it is shared over
+ * the network, its status and how full it is. The header icon is the plugin's
+ * own drawing (a lock with VC), not the VeraCrypt logo, which is a trademark. The lock in front of the name mounts or dismounts. The header has
+ * the structure of Unraid's own tiles, so the Dashboard adds its fold arrow. It uses the same script and the same password dialog
+ * as the Volumes tab. Everything else (add, edit, mount all, mount once) is
+ * on the Volumes tab, which the cog opens.
+ *
+ * The rows are added to the tile's own tbody by js/vcmount.js, as Unraid
+ * does for the Array tile. Never put a table inside the tile: the Dashboard's
+ * own script reads the title of every tbody on the page, and one without a
+ * title stops the whole Dashboard from loading.
+ */
+$vcm = '/plugins/veracrypt.mount';
+$mytiles['veracrypt-mount']['column1'] = <<<EOT
+<tbody id='vcm-rows' class='vcm-none' data-compact title="VeraCrypt Mount">
+  <tr>
+    <td>
+      <span class='tile-header'>
+        <span class='tile-header-left'>
+          <svg class='vcm-logo' width='32' height='32' viewBox='0 0 32 32' fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M10 13V10a6 6 0 0 1 12 0v3'/><rect x='5' y='13' width='22' height='15' rx='2'/><path d='M9 17.5l3 6.5 3-6.5'/><path d='M23 18.6a3.6 3.6 0 1 0 0 4.3'/></svg>
+          <div class='section'>
+            <h3 class='tile-header-main'>VeraCrypt Mount</h3>
+            <span id='vcm-tile-sub'></span><br>
+          </div>
+        </span>
+        <span class='tile-header-right'>
+          <span class='tile-header-right-controls'>
+            <a href='/Settings/VeraCryptMount' title='Volumes and settings'><i class='fa fa-fw fa-cog control'></i></a>
+          </span>
+        </span>
+      </span>
+    </td>
+  </tr>
+  <tr class='header'>
+    <td>
+      <span class='vcm-col-name'>Volume</span>
+      <span class='w18'>Share</span>
+      <span class='w18'>Status</span>
+      <span class='w18'>Utilization</span>
+    </td>
+  </tr>
+</tbody>
+EOT;
+?>
+<link type="text/css" rel="stylesheet" href="<?php autov("$vcm/css/vcmount.css") ?>">
+<?php include '/usr/local/emhttp/plugins/veracrypt.mount/include/dialog.php'; ?>
+<script src="<?php autov("$vcm/js/vcmount.js") ?>"></script>

@@ -1,0 +1,11 @@
+# Unix line endings (LF) for every text file, in the repository and on disk.
+# Windows line endings (CRLF) break scripts on Unraid.
+* text=auto eol=lf
+
+# Binary files: Git must never change these.
+*.txz  binary
+*.tgz  binary
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary

@@ -1,0 +1,48 @@
+# release.yml: build the plugin package for a version tag and publish it as a
+# GitHub release, where the .plg expects it
+# (releases/download/<version>/veracrypt.mount-<version>-noarch-1.txz).
+#
+# How to release:
+#   1. python scripts/build.py <version>      (writes version and SHA256 into the .plg)
+#   2. commit the .plg, then: git tag <version> && git push origin main <version>
+#
+# This workflow never changes the repository. It rebuilds the package from the
+# tagged sources and refuses to publish unless the .plg committed with that tag
+# describes exactly this package (build.py --check; builds are reproducible).
+#
+# Only GitHub's own tools are used: actions/checkout, pinned to a fixed commit,
+# and the gh command that GitHub's runners include.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]'
+      - '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9][a-z]'
+
+permissions:
+  contents: write   # to create the release; nothing else
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the tagged sources
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Build the package and check it against the .plg
+        run: python3 -I scripts/build.py --check "$GITHUB_REF_NAME"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "build/veracrypt.mount-$GITHUB_REF_NAME-noarch-1.txz" \
+            plugin/veracrypt.mount.plg \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "VeraCrypt Mount $GITHUB_REF_NAME" \
+            --notes "Install: Plugins > Install Plugin, with the address of veracrypt.mount.plg from this release or from the main branch."

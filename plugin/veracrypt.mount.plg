@@ -1,0 +1,83 @@
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "veracrypt.mount">
+<!ENTITY author    "bentrop">
+<!ENTITY version   "2026.11.17b">
+<!ENTITY sha256    "61ec6da24e9ae8da33b04af638b38d10d5475b4771aadaf1b2a9d17df572eb78">
+<!ENTITY launch    "Settings/VeraCryptMount">
+<!ENTITY gitURL    "https://github.com/bentrop/unraid-veracrypt-mount">
+<!ENTITY pluginURL "https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/&name;.plg">
+<!ENTITY package   "&name;-&version;-noarch-1.txz">
+<!ENTITY flash     "/boot/config/plugins/&name;">
+]>
+<!--
+VeraCrypt Mount: mounts VeraCrypt volumes with Unraid's built-in cryptsetup.
+The version and the SHA256 above are written by scripts/build.py; do not edit
+them by hand. Laid out as Unraid's own plugins do it (dynamix.system.info by
+Bergware): one Slackware package, installed with upgradepkg and removed with
+removepkg, so every file it brings is also taken away again.
+-->
+<PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;"
+        pluginURL="&pluginURL;" support="&gitURL;/issues" icon="veracrypt.mount.png" min="7.4.0">
+
+<CHANGES>
+##VeraCrypt Mount
+
+###&version;
+- See the commit history on GitHub.
+</CHANGES>
+
+<!-- Before installing: remove packages of other versions from the flash drive. -->
+<FILE Run="/bin/bash">
+<INLINE>
+mkdir -p &flash;
+for old in &flash;/&name;-*.txz; do
+  [ -e "$old" ] &amp;&amp; [ "$(basename "$old")" != "&package;" ] &amp;&amp; rm -f "$old"
+done
+true
+</INLINE>
+</FILE>
+
+<!-- The package. Downloaded only when the flash drive does not already hold this
+     version; the plugin manager checks the SHA256 either way. -->
+<FILE Name="&flash;/&package;" Run="upgradepkg --install-new --reinstall">
+<URL>&gitURL;/releases/download/&version;/&package;</URL>
+<SHA256>&sha256;</SHA256>
+</FILE>
+
+<FILE Run="/bin/bash">
+<INLINE>
+echo ""
+echo "-----------------------------------------------------------"
+echo " VeraCrypt Mount &version; is installed."
+echo " Settings > User Utilities > VeraCrypt Mount, or vcmount over SSH."
+echo "-----------------------------------------------------------"
+echo ""
+</INLINE>
+</FILE>
+
+<!-- Removal. Volumes are dismounted first, never forced: if one is still in
+     use, the removal stops and nothing is taken away, so no volume is left
+     mounted without the hooks that dismount it when the array stops. The
+     saved volume list (volumes.json) stays on the flash drive. -->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+if [ -x /usr/local/emhttp/plugins/&name;/scripts/vcmount ]; then
+  if ! /usr/local/emhttp/plugins/&name;/scripts/vcmount dismount --all; then
+    echo "Not removed: a volume is still mounted and in use. Dismount it, then remove the plugin again."
+    exit 1
+  fi
+fi
+removepkg &name;
+rmdir /etc/samba/veracrypt-shares 2&gt;/dev/null
+rm -f &flash;/&name;-*.txz
+echo ""
+echo "-----------------------------------------------------------"
+echo " VeraCrypt Mount has been removed."
+echo " Your volume list stays in &flash;/volumes.json."
+echo "-----------------------------------------------------------"
+echo ""
+</INLINE>
+</FILE>
+
+</PLUGIN>

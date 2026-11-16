@@ -1,0 +1,2162 @@
+#!/usr/bin/php
+<?php
+/*
+ * vcmount: the engine of the VeraCrypt Mount plugin for Unraid.
+ *
+ * The web pages and the event hooks call this program; they contain no mount
+ * logic of their own. The design is in docs/DESIGN-engine.md.
+ *
+ * Built so far: list, status, mount, dismount (also forced), for volumes that
+ * open with a password; dependents that are single containers; SMB shares and
+ * the check for network clients (VOL-7). Not built yet: keyfiles, PIM, hidden
+ * volumes, Compose stacks.
+ *
+ * This program never reads a password. cryptsetup reads it directly from
+ * standard input.
+ */
+
+// Where the saved volumes are kept. Contains no secrets.
+// For development, the environment variable VCMOUNT_CONFIG names another file.
+const DEFAULT_CONFIG = '/boot/config/plugins/veracrypt.mount/volumes.json';
+
+// An unlocked volume appears as /dev/mapper/vcm-<name>. The prefix marks it as
+// ours; the engine never touches a device without it.
+const MAPPER_DIR = '/dev/mapper';
+const MAPPER_PREFIX = 'vcm-';
+
+// A volume name: letters, digits, - and _, at most 32 characters.
+const NAME_PATTERN = '/\A[A-Za-z0-9][A-Za-z0-9_-]{0,31}\z/';
+
+// Result codes (docs/DESIGN-engine.md, section 3).
+const CODE_OK = 0;
+const CODE_USAGE = 1;          // wrong usage or a fault in the configuration
+const CODE_UNLOCK_FAILED = 2;  // wrong password, PIM or keyfile
+const CODE_REFUSED = 3;        // refused by a safety check, nothing changed
+const CODE_FILESYSTEM = 4;     // could not be mounted, volume locked again
+const CODE_BUSY = 5;           // dismount aborted, volume stays mounted
+const CODE_IN_PROGRESS = 6;    // another vcmount action is still running
+const CODE_DEPENDENT = 7;      // mounted, but a dependent could not be started
+const CODE_SHARE = 8;          // mounted, but the SMB share could not be added
+
+// A container name as Docker allows it. It cannot start with "-", so it can
+// never be misread as an option.
+const CONTAINER_PATTERN = '/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\z/';
+
+// Unraid's own program for sending a notification.
+const NOTIFY_SCRIPT = '/usr/local/emhttp/webGui/scripts/notify';
+
+// Seconds a dependent gets to stop by itself before Docker kills it (DOC-4).
+const DEFAULT_GRACE = 60;
+
+// Seconds a program or container gets to end by itself in a forced dismount.
+const FORCE_WAIT = 10;
+
+// SMB shares (docs/DESIGN-engine.md, section 9b). All of /etc/samba is in RAM.
+// Unraid's smb.conf includes SMB_HOOK; it belongs to Unassigned Devices, which
+// keeps our include lines as long as the files they name exist.
+const SHARE_DIR = '/etc/samba/veracrypt-shares';
+const SMB_HOOK = '/etc/samba/smb-unassigned.conf';
+// Unraid's own state file; shareSMBEnabled says whether SMB is turned on.
+const UNRAID_VARS = '/var/local/emhttp/var.ini';
+// A user name as Unraid allows it.
+const USER_PATTERN = '/\A[a-z_][a-z0-9_-]{0,31}\z/';
+
+// The plugin's yes/no settings and their defaults.
+const SETTINGS = [
+    'force_at_array_stop' => true,   // LIFE-10
+    'require_https' => true,         // UI-5; on by default since 2026-11-17 (review P1)
+    'show_on_main' => false,         // UI-3
+];
+
+// The largest settings file save-config accepts, in bytes.
+const MAX_CONFIG_SIZE = 1048576;
+
+// Held while an action that changes something runs. In RAM.
+const LOCK_FILE = '/var/run/vcmount.lock';
+
+// Time limits in seconds, so the engine can never hang forever.
+const UNLOCK_TIMEOUT = 180;    // cryptsetup checking a password (slow on purpose)
+const TOOL_TIMEOUT = 60;       // every other program
+
+const USAGE = <<<TEXT
+Usage:
+  vcmount list                               list saved volumes and anything mounted
+  vcmount status <name>                      show one volume
+  vcmount mount <name> [--read-only]         unlock and mount a saved volume
+  vcmount mount --file <path> --name <name> [--read-only]
+                                             mount without saving
+  vcmount dismount <name> [--force]          stop the dependents, dismount and lock
+  vcmount dismount --all [--force]           the same for every mounted volume
+  vcmount dismount --all --array-stop        as the array-stop hook calls it: forced
+                                             unless the setting turns that off
+  vcmount stop-dependents --all              stop the dependents of every mounted volume
+  vcmount repair-shares                      make the SMB shares match the mounted volumes
+  vcmount options                            list the users and containers the forms offer
+  vcmount busy                               say whether another vcmount action is running
+  vcmount privacy                            check activity-logging plugins (PRIV-3): the
+                                             exclusion line File Activity needs, if any
+  vcmount config                             show the saved settings and their revision
+  vcmount save-config [--revision <r>]       check new settings (JSON on standard input)
+                                             and save them; with --revision only if the
+                                             file is still the one read with "config"
+  vcmount help                               show this text
+
+A dependent that does not stop within its grace period is killed.
+The web page adds --over-http to a mount whose password came over plain HTTP;
+it is refused while the setting "require_https" is on.
+Without --force a volume that is still in use stays mounted. With --force the
+programs and containers that hold it open are ended, then it is dismounted.
+Add --json to any command for machine-readable output.
+The password is read from standard input by cryptsetup, never from the command line.
+Just run the command: you will be asked for the password, and it is not shown.
+Never put it on the command line (no "echo password | vcmount ..."): the shell
+would keep it in its history.
+TEXT;
+
+/** An error that ends the run. Its code is the result code. */
+class Fail extends Exception
+{
+    /** Extra facts for the caller, for example which programs hold a volume open. */
+    public array $details = [];
+}
+
+/**
+ * Read the saved volumes. Returns a list indexed by volume name.
+ * A missing file means "no saved volumes".
+ */
+function config_path(): string
+{
+    $path = getenv('VCMOUNT_CONFIG');
+    return $path === false || $path === '' ? DEFAULT_CONFIG : $path;
+}
+
+/**
+ * One yes/no setting from the "settings" part of the configuration file.
+ * A missing or unreadable file or setting gives the default.
+ */
+function setting(string $key, bool $default): bool
+{
+    // A setting that is not yes or no gives the default, so a fault in the
+    // file never blocks the array-stop hook.
+    $data = json_decode((string) @file_get_contents(config_path()), true);
+    $given = is_array($data) ? ($data['settings'] ?? null) : null;
+    $value = is_array($given) ? ($given[$key] ?? null) : null;
+    return is_bool($value) ? $value : $default;
+}
+
+function load_config(): array
+{
+    $path = config_path();
+    if (!is_file($path)) {
+        return [];
+    }
+    $data = json_decode((string) file_get_contents($path), true);
+    return check_config($data, "The configuration file $path")['volumes'];
+}
+
+/**
+ * Check settings as they come from the file or from save-config. $source names
+ * them in error messages. Returns 'volumes' (indexed by name) and 'settings'.
+ * Used for both, so there is only one set of rules (Decision U1).
+ */
+function check_config($data, string $source): array
+{
+    if (!is_array($data) || !is_array($data['volumes'] ?? null)) {
+        throw new Fail("$source is not valid.", CODE_USAGE);
+    }
+    $given = $data['settings'] ?? [];
+    if (!is_array($given)) {
+        throw new Fail("$source has settings that are not valid.", CODE_USAGE);
+    }
+    $settings = [];
+    foreach (SETTINGS as $key => $default) {
+        $value = $given[$key] ?? $default;
+        if (!is_bool($value)) {
+            throw new Fail("$source has a setting \"$key\" that is not yes or no.", CODE_USAGE);
+        }
+        $settings[$key] = $value;
+    }
+
+    $volumes = [];
+    foreach ($data['volumes'] as $entry) {
+        $name = is_array($entry) ? ($entry['name'] ?? null) : null;
+        if (!is_string($name) || !preg_match(NAME_PATTERN, $name)) {
+            throw new Fail("$source contains a volume with an invalid name.", CODE_USAGE);
+        }
+        if (isset($volumes[$name])) {
+            throw new Fail("$source contains the volume \"$name\" twice.", CODE_USAGE);
+        }
+        $file = $entry['file'] ?? null;
+        if (!is_string($file) || $file === '' || $file[0] !== '/') {
+            throw new Fail("The volume \"$name\" has no valid path to its volume file.", CODE_USAGE);
+        }
+        $display = $entry['display_name'] ?? null;
+        $mount_at = $entry['mount_at'] ?? null;
+        if (($display !== null && !is_string($display)) || ($mount_at !== null && !is_string($mount_at))
+            || (is_string($display) && (strlen($display) > 100 || preg_match('/[\x00-\x1f]/', $display)))) {
+            throw new Fail("The volume \"$name\" has a display name or mount location that is not valid.", CODE_USAGE);
+        }
+
+        $volumes[$name] = [
+            'name' => $name,
+            'display_name' => is_string($display) && $display !== '' ? $display : $name,
+            'file' => $file,
+            'mount_at' => is_string($mount_at) && $mount_at !== '' ? $mount_at : "/mnt/addons/$name",
+            'read_only' => !empty($entry['read_only']),
+            'hidden' => !empty($entry['hidden']),
+            'dependents' => read_dependents($name, $entry['dependents'] ?? []),
+            'share' => read_share($name, $entry['share'] ?? null),
+        ];
+    }
+    return ['volumes' => $volumes, 'settings' => $settings];
+}
+
+/**
+ * Check the "dependents" list of one saved volume. The order of the list is
+ * the order in which the containers are started. Each entry:
+ *   container: the name of the Docker container
+ *   grace:     seconds it gets to stop by itself, default 60
+ *   delay:     seconds to wait after starting it, default 0
+ */
+function read_dependents(string $volume, $list): array
+{
+    $fault = new Fail("The volume \"$volume\" has a dependent that is not valid.", CODE_USAGE);
+    if (!is_array($list)) {
+        throw $fault;
+    }
+    $dependents = [];
+    foreach ($list as $entry) {
+        $container = is_array($entry) ? ($entry['container'] ?? null) : null;
+        $grace = $entry['grace'] ?? DEFAULT_GRACE;
+        $delay = $entry['delay'] ?? 0;
+        if (!is_string($container) || !preg_match(CONTAINER_PATTERN, $container)
+            || !is_int($grace) || $grace < 1 || $grace > 600
+            || !is_int($delay) || $delay < 0 || $delay > 600) {
+            throw $fault;
+        }
+        $dependents[] = ['container' => $container, 'grace' => $grace, 'delay' => $delay];
+    }
+    return $dependents;
+}
+
+/**
+ * Check the "share" entry of one saved volume (SHR-1, SHR-2). Returns null when
+ * the volume is not shared. Like Unraid's own "Private" share security
+ * (decision 2026-11-16): only the users listed may connect, each read-write or
+ * read-only. Guests never get access, so Unraid's "Public" and "Secure" levels
+ * are not offered. Entry:
+ *   export: "yes", or "hidden" to hide it from network browsing; default "yes"
+ *   users:  {"<user>": "read-write" | "read-only", ...}, at least one
+ */
+function read_share(string $volume, $entry): ?array
+{
+    if ($entry === null || $entry === false) {
+        return null;
+    }
+    $fault = new Fail("The volume \"$volume\" has share settings that are not valid.", CODE_USAGE);
+    if (!is_array($entry) || !is_array($entry['users'] ?? null) || $entry['users'] === []) {
+        throw $fault;
+    }
+    $export = $entry['export'] ?? 'yes';
+    if (!in_array($export, ['yes', 'hidden'], true)) {
+        throw $fault;
+    }
+    $users = [];
+    foreach ($entry['users'] as $user => $access) {
+        if (!is_string($user) || !preg_match(USER_PATTERN, $user)
+            || !in_array($access, ['read-write', 'read-only'], true)) {
+            throw $fault;
+        }
+        $users[$user] = $access;
+    }
+    ksort($users);
+    return ['export' => $export, 'users' => $users];
+}
+
+/**
+ * The kernel's own name ("dm-3") for a device path such as /dev/mapper/vcm-x.
+ * Returns null if the device does not exist.
+ */
+function dm_name(string $device): ?string
+{
+    $real = realpath($device);
+    if ($real === false) {
+        return null;
+    }
+    $base = basename($real);
+    if (preg_match('/\Adm-\d+\z/', $base)) {
+        return $base;
+    }
+    // Not a link to /dev/dm-N: work the number out from the device itself.
+    $info = @stat($real);
+    if ($info === false) {
+        return null;
+    }
+    $minor = ($info['rdev'] & 0xff) | (($info['rdev'] >> 12) & 0xfff00);
+    return "dm-$minor";
+}
+
+/** Turn the \040 style escapes used in /proc/mounts back into characters. */
+function unescape_mount_field(string $field): string
+{
+    return preg_replace_callback(
+        '/\\\\([0-7]{3})/',
+        function (array $m): string {
+            return chr(octdec($m[1]));
+        },
+        $field
+    );
+}
+
+/**
+ * Read the system's mount table. Returns, per kernel device name ("dm-3"),
+ * where it is mounted, with which filesystem and whether read-only.
+ */
+function read_mounts(): array
+{
+    $mounts = [];
+    $lines = @file('/proc/mounts', FILE_IGNORE_NEW_LINES);
+    foreach ($lines === false ? [] : $lines as $line) {
+        $fields = explode(' ', $line);
+        if (count($fields) < 4) {
+            continue;
+        }
+        $device = unescape_mount_field($fields[0]);
+        if (strncmp($device, '/dev/mapper/', 12) !== 0 && strncmp($device, '/dev/dm-', 8) !== 0) {
+            continue;
+        }
+        $dm = dm_name($device);
+        if ($dm === null || isset($mounts[$dm])) {
+            continue;
+        }
+        $mounts[$dm] = [
+            'point' => unescape_mount_field($fields[1]),
+            // The kernel's names for the two NTFS drivers are "ntfs3" and "fuseblk".
+            'filesystem' => in_array($fields[2], ['ntfs3', 'fuseblk'], true) ? 'ntfs' : $fields[2],
+            'read_only' => in_array('ro', explode(',', $fields[3]), true),
+        ];
+    }
+    return $mounts;
+}
+
+/** The volume file behind an unlocked device, as the kernel reports it. */
+function backing_file(string $dm): ?string
+{
+    $slaves = glob("/sys/block/$dm/slaves/*");
+    if ($slaves === false || count($slaves) !== 1) {
+        return null;
+    }
+    $loop = basename($slaves[0]);
+    $file = @file_get_contents("/sys/block/$loop/loop/backing_file");
+    return $file === false ? null : rtrim($file, "\n");
+}
+
+/**
+ * Look at the live system: which of our volumes are unlocked or mounted now.
+ * Returns a list indexed by volume name. Nothing is read from a state file.
+ */
+function live_volumes(): array
+{
+    $mounts = read_mounts();
+    $live = [];
+    $devices = glob(MAPPER_DIR . '/' . MAPPER_PREFIX . '*');
+    foreach ($devices === false ? [] : $devices as $device) {
+        $name = substr(basename($device), strlen(MAPPER_PREFIX));
+        if (!preg_match(NAME_PATTERN, $name)) {
+            continue;
+        }
+        $dm = dm_name($device);
+        $mount = $dm === null ? null : ($mounts[$dm] ?? null);
+        $live[$name] = [
+            'file' => $dm === null ? null : backing_file($dm),
+            'mounted_at' => $mount['point'] ?? null,
+            'filesystem' => $mount['filesystem'] ?? null,
+            'read_only' => $mount['read_only'] ?? null,
+        ];
+    }
+    return $live;
+}
+
+/** Put the saved settings and the live state of one volume together. */
+function describe(string $name, ?array $saved, ?array $live): array
+{
+    $mounted_at = $live['mounted_at'] ?? null;
+    if ($live === null) {
+        $state = 'locked';
+    } elseif ($mounted_at === null) {
+        $state = 'unlocked';
+    } else {
+        $state = 'mounted';
+    }
+
+    $size = $mounted_at === null ? false : @disk_total_space($mounted_at);
+    $free = $mounted_at === null ? false : @disk_free_space($mounted_at);
+
+    return [
+        'name' => $name,
+        'display_name' => $saved['display_name'] ?? $name,
+        'saved' => $saved !== null,
+        'state' => $state,
+        'file' => $saved['file'] ?? ($live['file'] ?? null),
+        'mounted_at' => $mounted_at,
+        'mount_at' => $saved['mount_at'] ?? null,
+        'filesystem' => $live['filesystem'] ?? null,
+        'read_only' => $live['read_only'] ?? ($saved['read_only'] ?? false),
+        'size_bytes' => $size === false ? null : (int) $size,
+        'free_bytes' => $free === false ? null : (int) $free,
+        'share' => $saved['share'] ?? null,
+        'dependents' => array_column($saved['dependents'] ?? [], 'container'),
+        'share_active' => share_active($name),
+    ];
+}
+
+/** All volumes: the saved ones first, then anything mounted without saving. */
+function all_volumes(): array
+{
+    $saved = load_config();
+    $live = live_volumes();
+    $result = [];
+    foreach ($saved as $name => $volume) {
+        $result[] = describe($name, $volume, $live[$name] ?? null);
+    }
+    foreach ($live as $name => $state) {
+        if (!isset($saved[$name])) {
+            $result[] = describe($name, null, $state);
+        }
+    }
+    return $result;
+}
+
+function format_size(?int $bytes): string
+{
+    if ($bytes === null) {
+        return '-';
+    }
+    return $bytes < 1e9 ? sprintf('%d MB', $bytes / 1e6) : sprintf('%.1f GB', $bytes / 1e9);
+}
+
+function command_list(bool $json): int
+{
+    $volumes = all_volumes();
+    if ($json) {
+        $settings = [];
+        foreach (SETTINGS as $key => $default) {
+            $settings[$key] = setting($key, $default);
+        }
+        echo json_encode(['ok' => true, 'volumes' => $volumes, 'settings' => $settings], JSON_UNESCAPED_SLASHES), "\n";
+        return CODE_OK;
+    }
+    if ($volumes === []) {
+        echo "No volumes are saved and none is mounted.\n";
+        return CODE_OK;
+    }
+    printf("%-24s %-9s %-28s %s\n", 'NAME', 'STATE', 'MOUNTED AT', 'VOLUME FILE');
+    foreach ($volumes as $v) {
+        $name = $v['name'] . ($v['saved'] ? '' : ' (not saved)');
+        printf("%-24s %-9s %-28s %s\n", $name, $v['state'], $v['mounted_at'] ?? '-', $v['file'] ?? '-');
+    }
+    return CODE_OK;
+}
+
+function command_status(array $args, bool $json): int
+{
+    if (count($args) !== 1) {
+        throw new Fail("Usage: vcmount status <name>", CODE_USAGE);
+    }
+    $name = $args[0];
+    if (!preg_match(NAME_PATTERN, $name)) {
+        throw new Fail('That is not a valid volume name.', CODE_USAGE);
+    }
+    $saved = load_config()[$name] ?? null;
+    $live = live_volumes()[$name] ?? null;
+    if ($saved === null && $live === null) {
+        throw new Fail("There is no volume named \"$name\".", CODE_USAGE);
+    }
+    $v = describe($name, $saved, $live);
+
+    if ($json) {
+        echo json_encode(['ok' => true, 'volume' => $v], JSON_UNESCAPED_SLASHES), "\n";
+        return CODE_OK;
+    }
+    echo 'Name:        ', $v['name'], $v['saved'] ? '' : ' (not saved)', "\n";
+    echo 'State:       ', $v['state'], "\n";
+    echo 'Volume file: ', $v['file'] ?? '-', "\n";
+    echo 'Mounted at:  ', $v['mounted_at'] ?? '-', "\n";
+    echo 'Read-only:   ', $v['read_only'] ? 'yes' : 'no', "\n";
+    if ($v['state'] === 'mounted') {
+        echo 'Size:        ', format_size($v['size_bytes']), "\n";
+        echo 'Free:        ', format_size($v['free_bytes']), "\n";
+    }
+    if (($saved['share'] ?? null) !== null) {
+        $share = $saved['share'];
+        $how = [];
+        foreach ($share['users'] as $user => $access) {
+            $how[] = "$user " . ($v['read_only'] ? 'read-only' : $access);
+        }
+        if ($share['export'] === 'hidden') {
+            $how[] = 'hidden';
+        }
+        echo 'Share:       \\\\', php_uname('n'), '\\', $name, ' (', implode(', ', $how), ')',
+            $v['share_active'] ? '' : ' - not active', "\n";
+    }
+    foreach ($saved['dependents'] ?? [] as $dependent) {
+        $running = docker_ready() ? container_running($dependent['container']) : false;
+        $state = $running === null ? 'does not exist' : ($running ? 'running' : 'stopped');
+        echo 'Dependent:   ', $dependent['container'], " ($state)\n";
+    }
+    return CODE_OK;
+}
+
+/**
+ * Print the result of a successful dismount. $notes says what else happened
+ * on the way, for example that a dependent was killed.
+ */
+function report(bool $json, string $name, string $text, array $notes = []): void
+{
+    if ($json) {
+        $v = describe($name, load_config()[$name] ?? null, live_volumes()[$name] ?? null);
+        echo json_encode(['ok' => true, 'volume' => $v, 'notes' => $notes], JSON_UNESCAPED_SLASHES), "\n";
+    } else {
+        foreach ($notes as $note) {
+            echo $note, "\n";
+        }
+        echo $text, "\n";
+    }
+}
+
+/**
+ * Write one line to the system log. Events only: never a password, never a
+ * file name from inside a volume. Callers do not log volumes that are not saved.
+ */
+function log_event(string $message, bool $notify = false): void
+{
+    openlog('veracrypt.mount', 0, LOG_USER);
+    syslog(LOG_INFO, $message);
+    closelog();
+
+    // Faults also go to Unraid's notifications (LIFE-9), with the same text.
+    if ($notify && is_executable(NOTIFY_SCRIPT)) {
+        try {
+            run([NOTIFY_SCRIPT, '-e', 'VeraCrypt Mount', '-s', 'VeraCrypt Mount', '-d', $message, '-i', 'warning'], 20);
+        } catch (Fail $e) {
+            // A notification that cannot be sent must not stop a dismount.
+        }
+    }
+}
+
+/** The full path of a system program, looked up in the system folders only. */
+function program(string $name): string
+{
+    foreach (['/sbin', '/usr/sbin', '/bin', '/usr/bin'] as $dir) {
+        if (is_executable("$dir/$name")) {
+            return "$dir/$name";
+        }
+    }
+    throw new Fail("The program $name was not found on this server.", CODE_USAGE);
+}
+
+/**
+ * Start one program and wait for it, with a time limit.
+ *
+ * The program is started directly from a list of arguments. No shell is
+ * involved, so nothing in the arguments can be misread as a command.
+ *
+ * $stdin: what the program gets as standard input. Default: nothing.
+ * $show_errors: let the program write its error messages straight to the user.
+ */
+function run(array $command, int $timeout, $stdin = null, bool $show_errors = false): array
+{
+    $spec = [
+        0 => $stdin ?? ['file', '/dev/null', 'r'],
+        1 => ['pipe', 'w'],
+        2 => $show_errors ? STDERR : ['pipe', 'w'],
+    ];
+    $process = proc_open($command, $spec, $pipes);
+    if (!is_resource($process)) {
+        throw new Fail("Could not start {$command[0]}.", CODE_USAGE);
+    }
+
+    $open = $pipes;
+    $text = [1 => '', 2 => ''];
+    foreach ($open as $pipe) {
+        stream_set_blocking($pipe, false);
+    }
+    $deadline = microtime(true) + $timeout;
+    $timed_out = false;
+
+    while ($open !== []) {
+        $left = $deadline - microtime(true);
+        if ($left <= 0) {
+            $timed_out = true;
+            proc_terminate($process);
+            break;
+        }
+        $read = array_values($open);
+        $write = null;
+        $except = null;
+        if (stream_select($read, $write, $except, (int) ceil($left)) === false) {
+            break;
+        }
+        foreach ($read as $pipe) {
+            $key = array_search($pipe, $open, true);
+            $chunk = fread($pipe, 8192);
+            if ($chunk !== false && $chunk !== '') {
+                $text[$key] .= $chunk;
+            } elseif (feof($pipe)) {
+                fclose($pipe);
+                unset($open[$key]);
+            }
+        }
+    }
+    foreach ($open as $pipe) {
+        fclose($pipe);
+    }
+    $code = proc_close($process);
+
+    return [
+        'code' => $timed_out ? -1 : $code,
+        'out' => $text[1],
+        'err' => $text[2],
+        'timed_out' => $timed_out,
+    ];
+}
+
+/** Is the Docker service running? Asked once per run. */
+function docker_ready(): bool
+{
+    static $ready = null;
+    if ($ready === null) {
+        try {
+            $r = run([program('docker'), 'version', '--format', '{{.Server.Version}}'], TOOL_TIMEOUT);
+            $ready = $r['code'] === 0;
+        } catch (Fail $e) {
+            $ready = false;
+        }
+    }
+    return $ready;
+}
+
+/** Is this container running? Returns null if there is no such container. */
+function container_running(string $container): ?bool
+{
+    $r = run(
+        [program('docker'), 'inspect', '--type', 'container', '--format', '{{.State.Running}}', $container],
+        TOOL_TIMEOUT
+    );
+    return $r['code'] !== 0 ? null : trim($r['out']) === 'true';
+}
+
+/**
+ * Start the dependents of a volume in list order (DOC-3). One that fails does
+ * not hold back the others. Returns the failures, each with its reason.
+ */
+function start_dependents(string $volume, array $dependents): array
+{
+    $failed = [];
+    $last = count($dependents) - 1;
+    foreach ($dependents as $i => $dependent) {
+        $container = $dependent['container'];
+        $reason = null;
+        if (!docker_ready()) {
+            $reason = 'the Docker service is not running';
+        } else {
+            $running = container_running($container);
+            if ($running === null) {
+                $reason = 'there is no container with this name';
+            } elseif (!$running) {
+                $r = run([program('docker'), 'start', $container], TOOL_TIMEOUT);
+                if ($r['code'] !== 0) {
+                    $reason = $r['timed_out'] ? 'starting it took too long' : trim($r['err']);
+                }
+            }
+        }
+        if ($reason !== null) {
+            $failed[] = ['container' => $container, 'reason' => $reason];
+            log_event("dependent \"$container\" of \"$volume\" could not be started", true);
+        } elseif ($dependent['delay'] > 0 && $i < $last) {
+            sleep($dependent['delay']);
+        }
+    }
+    return $failed;
+}
+
+/**
+ * Stop the dependents of a volume in reverse list order (DOC-4). Each gets its
+ * grace period; "docker stop" kills what has not stopped by then (DOC-5).
+ * Returns, per dependent that was running: container, result (stopped, killed
+ * or failed) and a message.
+ */
+function stop_dependents(string $volume, array $dependents): array
+{
+    $results = [];
+    if ($dependents === [] || !docker_ready()) {
+        return $results;   // without the Docker service no container is running
+    }
+    foreach (array_reverse($dependents) as $dependent) {
+        $container = $dependent['container'];
+        if (!container_running($container)) {
+            continue;
+        }
+        $grace = $dependent['grace'];
+        $begin = microtime(true);
+        run([program('docker'), 'stop', '-t', (string) $grace, $container], $grace + 30);
+        $took = microtime(true) - $begin;
+
+        if (container_running($container)) {
+            $result = 'failed';
+            $message = "Dependent \"$container\" could not be stopped.";
+            log_event("dependent \"$container\" of \"$volume\" could not be stopped", true);
+        } elseif ($took >= $grace) {
+            $result = 'killed';
+            $message = "Dependent \"$container\" did not stop within $grace seconds and was killed.";
+            log_event("dependent \"$container\" of \"$volume\" did not stop within $grace seconds and was killed", true);
+        } else {
+            $result = 'stopped';
+            $message = "Stopped dependent \"$container\".";
+        }
+        $results[] = ['container' => $container, 'result' => $result, 'message' => $message];
+    }
+    return $results;
+}
+
+/** The file that holds the Samba settings of one share. */
+function share_file(string $name): string
+{
+    return SHARE_DIR . "/$name.conf";
+}
+
+/** The line in SMB_HOOK that makes Samba read one share file. */
+function include_line(string $name): string
+{
+    return 'include = ' . share_file($name);
+}
+
+/** The lines of SMB_HOOK, without line ends. A missing file has none. */
+function hook_lines(): array
+{
+    $lines = @file(SMB_HOOK, FILE_IGNORE_NEW_LINES);
+    return $lines === false ? [] : $lines;
+}
+
+/**
+ * Write SMB_HOOK again with these lines. Written to a temporary file first and
+ * then renamed over the original, so the file is never half written.
+ */
+function write_hook(array $lines): void
+{
+    $temp = SMB_HOOK . '.vcmount-new';
+    $text = $lines === [] ? '' : implode("\n", $lines) . "\n";
+    if (@file_put_contents($temp, $text) === false || !@chmod($temp, 0644) || !@rename($temp, SMB_HOOK)) {
+        @unlink($temp);
+        throw new Fail('Could not write ' . SMB_HOOK . '.', CODE_SHARE);
+    }
+}
+
+/** Is the include line of this share in SMB_HOOK? */
+function hook_has(string $name): bool
+{
+    return in_array(include_line($name), array_map('trim', hook_lines()), true);
+}
+
+/** Add the include line of this share to SMB_HOOK, unless it is there. */
+function hook_add(string $name): void
+{
+    if (!hook_has($name)) {
+        $lines = hook_lines();
+        $lines[] = include_line($name);
+        write_hook($lines);
+    }
+}
+
+/** Remove the include line of this share from SMB_HOOK. Touches no other line. */
+function hook_remove(string $name): void
+{
+    $lines = hook_lines();
+    $kept = array_values(array_filter($lines, function (string $line) use ($name): bool {
+        return trim($line) !== include_line($name);
+    }));
+    if (count($kept) !== count($lines)) {
+        write_hook($kept);
+    }
+}
+
+/** Tell the running Samba to read its settings again. Returns whether it worked. */
+function samba_reload(): bool
+{
+    try {
+        return run([program('smbcontrol'), 'all', 'reload-config'], TOOL_TIMEOUT)['code'] === 0;
+    } catch (Fail $e) {
+        return false;
+    }
+}
+
+/** Is SMB turned on in Unraid's settings? Unknown counts as yes. */
+function smb_enabled(): bool
+{
+    $vars = @parse_ini_file(UNRAID_VARS);
+    return !is_array($vars) || ($vars['shareSMBEnabled'] ?? 'yes') !== 'no';
+}
+
+/** Does this user exist on the server? Read from /etc/passwd. */
+function user_exists(string $user): bool
+{
+    $lines = @file('/etc/passwd', FILE_IGNORE_NEW_LINES);
+    foreach ($lines === false ? [] : $lines as $line) {
+        if (explode(':', $line, 2)[0] === $user) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * The names of all shares Samba knows now, in lower case (Samba ignores case).
+ * Read with testparm, which follows every include file.
+ */
+function samba_share_names(): array
+{
+    $r = run([program('testparm'), '-s'], TOOL_TIMEOUT);
+    if ($r['code'] !== 0) {
+        throw new Fail('Could not read the Samba settings (testparm failed).', CODE_SHARE);
+    }
+    preg_match_all('/^\[([^\]\n]+)\]\s*$/m', $r['out'], $m);
+    return array_map('strtolower', $m[1]);
+}
+
+/** The text of one share file (docs/DESIGN-engine.md, section 9b). */
+function share_text(string $name, array $share, string $point, bool $read_only): string
+{
+    // As Unraid's "Private" shares: everyone listed may read, the read-write
+    // users may also write. A volume mounted read-only gives nobody write access.
+    $writers = array_keys(array_filter($share['users'], function (string $access): bool {
+        return $access === 'read-write';
+    }));
+    return "[$name]\n"
+        . "\tpath = $point\n"
+        . "\tcomment = VeraCrypt volume\n"
+        . "\tbrowseable = " . ($share['export'] === 'hidden' ? 'no' : 'yes') . "\n"
+        . "\tguest ok = no\n"
+        . "\tvalid users = " . implode(' ', array_keys($share['users'])) . "\n"
+        . "\tread only = yes\n"
+        . ($read_only || $writers === [] ? '' : "\twrite list = " . implode(' ', $writers) . "\n")
+        . "\tforce user = nobody\n"
+        . "\tforce group = users\n"
+        . "\tcreate mask = 0666\n"
+        . "\tdirectory mask = 0777\n"
+        // As Unassigned Devices does: whatever Samba reads next is not part of this share.
+        . "\n[global]\n";
+}
+
+/** Is the share of this volume in place: its file and its include line? */
+function share_active(string $name): bool
+{
+    return is_file(share_file($name)) && hook_has($name);
+}
+
+/**
+ * Add the SMB share of a mounted volume, or write it again. On a refusal
+ * nothing is written. Throws Fail with CODE_SHARE.
+ */
+function add_share(string $name, array $share, string $point, bool $read_only): void
+{
+    if (!smb_enabled()) {
+        throw new Fail("No share for \"$name\": SMB is turned off in Unraid's settings.", CODE_SHARE);
+    }
+    foreach (array_keys($share['users']) as $user) {
+        if (!user_exists($user)) {
+            throw new Fail("No share for \"$name\": there is no user named \"$user\" on this server.", CODE_SHARE);
+        }
+    }
+    // Samba reads % as a placeholder and cannot take a line break in a path.
+    if (preg_match('/[\x00-\x1f%]/', $point)) {
+        throw new Fail("No share for \"$name\": its mount location contains characters Samba cannot use.", CODE_SHARE);
+    }
+    $file = share_file($name);
+    if (!is_file($file) && in_array(strtolower($name), samba_share_names(), true)) {
+        throw new Fail("No share for \"$name\": another share already has this name.", CODE_SHARE);
+    }
+
+    if (!is_dir(SHARE_DIR) && !@mkdir(SHARE_DIR, 0755)) {
+        throw new Fail('Could not create ' . SHARE_DIR . '.', CODE_SHARE);
+    }
+    if (@file_put_contents($file, share_text($name, $share, $point, $read_only)) === false) {
+        throw new Fail("Could not write $file.", CODE_SHARE);
+    }
+    @chmod($file, 0644);
+    try {
+        hook_add($name);
+    } catch (Fail $e) {
+        @unlink($file);
+        throw $e;
+    }
+    if (!samba_reload()) {
+        throw new Fail("The share of \"$name\" was written, but Samba did not take it up (smbcontrol failed).", CODE_SHARE);
+    }
+}
+
+/**
+ * Remove the SMB share of a volume, if there is one: settings first, then
+ * disconnect the clients that are still connected. Never throws; returns notes
+ * on what did not work, for the caller to report.
+ */
+function remove_share(string $name): array
+{
+    $file = share_file($name);
+    if (!is_file($file) && !hook_has($name)) {
+        return [];
+    }
+    $notes = [];
+    if (is_file($file) && !@unlink($file)) {
+        $notes[] = "Could not delete $file.";
+    }
+    try {
+        hook_remove($name);
+    } catch (Fail $e) {
+        $notes[] = $e->getMessage();
+    }
+    // Without a running Samba (for example at array stop) there is nobody to tell.
+    if (!samba_running()) {
+        return $notes;
+    }
+    if (!samba_reload()) {
+        $notes[] = "Samba did not take up the removal of the share \"$name\" (smbcontrol failed).";
+    }
+    try {
+        run([program('smbcontrol'), 'all', 'close-share', $name], TOOL_TIMEOUT);
+    } catch (Fail $e) {
+        $notes[] = $e->getMessage();
+    }
+    return $notes;
+}
+
+/** Is Samba running? If that cannot be found out, the answer is yes. */
+function samba_running(): bool
+{
+    try {
+        return run([program('pgrep'), '-x', 'smbd'], TOOL_TIMEOUT)['code'] === 0;
+    } catch (Fail $e) {
+        return true;
+    }
+}
+
+/**
+ * Is this volume file open from the network right now (VOL-7)? Asks Samba for
+ * its list of open files. Returns a short description of who has it open, or
+ * null. Throws Fail (refused) when Samba runs but cannot be asked.
+ */
+function network_open(string $file): ?string
+{
+    try {
+        $r = run([program('smbstatus'), '-L', '--json'], TOOL_TIMEOUT);
+    } catch (Fail $e) {
+        return null;   // no Samba on this server, so no network client
+    }
+    $data = $r['code'] === 0 ? json_decode($r['out'], true) : null;
+    if (!is_array($data)) {
+        // Samba not running means no network client. Otherwise refuse.
+        if (!samba_running()) {
+            return null;
+        }
+        throw new Fail('Refused: could not ask Samba whether a network client has the volume file open.', CODE_REFUSED);
+    }
+    foreach ($data['open_files'] ?? [] as $key => $open) {
+        $path = (string) $key;
+        if (is_array($open) && isset($open['service_path'], $open['filename'])) {
+            $path = rtrim((string) $open['service_path'], '/') . '/' . ltrim((string) $open['filename'], '/');
+        }
+        if (same_file($path, $file)) {
+            $users = [];
+            foreach (is_array($open['opens'] ?? null) ? $open['opens'] : [] as $entry) {
+                if (is_array($entry) && isset($entry['username'])) {
+                    $users[] = (string) $entry['username'];
+                }
+            }
+            return $users === [] ? 'a network client' : 'network user ' . implode(', ', array_unique($users));
+        }
+    }
+    return null;
+}
+
+/**
+ * Make sure only one vcmount action that changes something runs at a time.
+ * A second one stops at once instead of waiting.
+ */
+function take_lock()
+{
+    $handle = @fopen(LOCK_FILE, 'c');
+    if ($handle === false) {
+        throw new Fail('Could not create the lock file ' . LOCK_FILE . '.', CODE_USAGE);
+    }
+    if (!flock($handle, LOCK_EX | LOCK_NB)) {
+        throw new Fail('Another vcmount action is still running.', CODE_IN_PROGRESS);
+    }
+    return $handle;
+}
+
+/** Every place where something is mounted right now. */
+function mount_points(): array
+{
+    $points = [];
+    $lines = @file('/proc/mounts', FILE_IGNORE_NEW_LINES);
+    foreach ($lines === false ? [] : $lines as $line) {
+        $fields = explode(' ', $line);
+        if (count($fields) >= 2) {
+            $points[] = unescape_mount_field($fields[1]);
+        }
+    }
+    return $points;
+}
+
+/**
+ * Is this volume file already in use as a device on the server?
+ * Returns the device name ("loop3") or null.
+ *
+ * On Unraid the same file is reachable as /mnt/user/<share>/... and as
+ * /mnt/<disk or pool>/<share>/.... Both count as the same file here. That can
+ * refuse a mount that would have been safe, never the other way round.
+ */
+function file_in_use(string $file): ?string
+{
+    $paths = glob('/sys/block/loop*/loop/backing_file');
+    foreach ($paths === false ? [] : $paths as $path) {
+        $backing = rtrim((string) @file_get_contents($path), "\n");
+        if ($backing !== '' && same_file($backing, $file)) {
+            return basename(dirname($path, 2));
+        }
+    }
+    return null;
+}
+
+/**
+ * Are these two paths the same file? /mnt/user/<share>/x and /mnt/<disk>/<share>/x
+ * count as the same (see file_in_use).
+ */
+function same_file(string $one, string $two): bool
+{
+    if ($one === $two) {
+        return true;
+    }
+    $pattern = '#\A/mnt/([^/]+)/(.+)\z#';
+    if (!preg_match($pattern, $one, $a) || !preg_match($pattern, $two, $b)) {
+        return false;
+    }
+    $through_user_share = in_array($a[1], ['user', 'user0'], true) || in_array($b[1], ['user', 'user0'], true);
+    return $through_user_share && $a[2] === $b[2];
+}
+
+/** Refuse a mount point that is not safe to use. Creates nothing. */
+function check_mount_point(string $point): void
+{
+    if (!preg_match('#\A/mnt/[^/]+/[^/]+#', $point) || strpos($point, '//') !== false
+        || preg_match('#/\.\.?(/|\z)#', $point)) {
+        throw new Fail("The mount location $point is not valid. It must be a folder below /mnt/<something>/.", CODE_USAGE);
+    }
+    if (is_link($point)) {
+        throw new Fail("Refused: the mount location $point is a link.", CODE_REFUSED);
+    }
+    if (!file_exists($point)) {
+        return;
+    }
+    if (!is_dir($point)) {
+        throw new Fail("Refused: the mount location $point exists and is not a folder.", CODE_REFUSED);
+    }
+    if (in_array($point, mount_points(), true)) {
+        throw new Fail("Refused: something is already mounted at $point.", CODE_REFUSED);
+    }
+    $content = scandir($point);
+    if ($content === false || count($content) > 2) {
+        throw new Fail("Refused: the mount location $point is not an empty folder.", CODE_REFUSED);
+    }
+}
+
+/** Lock an unlocked volume again. Returns whether it is locked afterwards. */
+function lock_again(string $mapper): bool
+{
+    $device = MAPPER_DIR . '/' . $mapper;
+    if (!file_exists($device) && !is_link($device)) {
+        return true;
+    }
+    $r = run([program('cryptsetup'), 'close', $mapper], TOOL_TIMEOUT);
+    return $r['code'] === 0;
+}
+
+/**
+ * Unlock and mount one volume (docs/DESIGN-engine.md, section 7).
+ * Whatever goes wrong, the steps already taken are undone.
+ */
+function do_mount(string $name, string $file, string $point, bool $read_only): void
+{
+    $real = realpath($file);
+    if ($real === false || !is_file($real)) {
+        throw new Fail("The volume file $file does not exist or is not an ordinary file.", CODE_USAGE);
+    }
+    $mapper = MAPPER_PREFIX . $name;
+    $device = MAPPER_DIR . '/' . $mapper;
+
+    // Safety checks. Nothing has been changed when one of them refuses.
+    if (file_exists($device) || is_link($device)) {
+        throw new Fail("Refused: \"$name\" is already unlocked or mounted.", CODE_REFUSED);
+    }
+    $loop = file_in_use($real);
+    if ($loop !== null) {
+        throw new Fail("Refused: the volume file is already in use on this server (as $loop).", CODE_REFUSED);
+    }
+    check_mount_point($point);
+    // VOL-7: mounting here while Windows has it open would corrupt the volume.
+    $client = network_open($real) ?? ($real === $file ? null : network_open($file));
+    if ($client !== null) {
+        throw new Fail("Refused: the volume file is open over the network ($client).", CODE_REFUSED);
+    }
+
+    // Unlock. cryptsetup reads the password itself, straight from our
+    // standard input. This program never sees it.
+    $command = [program('cryptsetup'), 'tcryptOpen', '--veracrypt'];
+    if ($read_only) {
+        $command[] = '--readonly';
+    }
+    $command[] = $real;
+    $command[] = $mapper;
+    $r = run($command, UNLOCK_TIMEOUT, STDIN, true);
+    if ($r['code'] !== 0) {
+        lock_again($mapper);
+        if ($r['timed_out']) {
+            throw new Fail('Unlocking took too long and was stopped.', CODE_UNLOCK_FAILED);
+        }
+        if ($r['code'] === 2) {
+            throw new Fail('Could not unlock: wrong password, or not a VeraCrypt volume.', CODE_UNLOCK_FAILED);
+        }
+        throw new Fail("cryptsetup could not open the volume (its result code was {$r['code']}).", CODE_USAGE);
+    }
+
+    // Which filesystem is inside?
+    $r = run([program('blkid'), '-o', 'value', '-s', 'TYPE', $device], TOOL_TIMEOUT);
+    $found = trim($r['out']);
+    $drivers = ['ntfs' => 'ntfs3', 'exfat' => 'exfat'];
+    if (!isset($drivers[$found])) {
+        $locked = lock_again($mapper);
+        throw new Fail(
+            'The volume was unlocked, but it contains neither NTFS nor exFAT'
+            . ($found === '' ? '' : " (found: $found)") . '. '
+            . ($locked ? 'It was locked again.' : 'It could NOT be locked again.'),
+            CODE_FILESYSTEM
+        );
+    }
+
+    // Mount. Never with the "force" option.
+    $created = false;
+    if (!is_dir($point)) {
+        if (!@mkdir($point, 0755, true)) {
+            lock_again($mapper);
+            throw new Fail("Could not create the mount location $point. The volume was locked again.", CODE_FILESYSTEM);
+        }
+        $created = true;
+    }
+    $options = 'nosuid,nodev,uid=99,gid=100';
+    if ($found === 'ntfs') {
+        $options .= ',windows_names';
+    }
+    if ($read_only) {
+        $options .= ',ro';
+    }
+    $r = run([program('mount'), '-t', $drivers[$found], '-o', $options, $device, $point], TOOL_TIMEOUT);
+    if ($r['code'] !== 0) {
+        if ($created) {
+            @rmdir($point);
+        }
+        $locked = lock_again($mapper);
+        throw new Fail(
+            "The volume was unlocked, but its filesystem could not be mounted.\n"
+            . trim($r['err']) . "\n"
+            . "If the volume was not closed cleanly: mount it in VeraCrypt on Windows, run a disk check (chkdsk), then try again.\n"
+            . ($locked ? 'The volume was locked again.' : 'The volume could NOT be locked again.'),
+            CODE_FILESYSTEM
+        );
+    }
+}
+
+function command_mount(array $args, array $options, bool $json): int
+{
+    $config = load_config();
+
+    if ($options['file'] !== null || $options['name'] !== null) {
+        // Mount without saving: nothing about it is stored or logged.
+        if ($args !== [] || $options['file'] === null || $options['name'] === null) {
+            throw new Fail('Usage: vcmount mount --file <path> --name <name> [--read-only]', CODE_USAGE);
+        }
+        $name = $options['name'];
+        if (!preg_match(NAME_PATTERN, $name)) {
+            throw new Fail('That is not a valid volume name.', CODE_USAGE);
+        }
+        if (isset($config[$name])) {
+            throw new Fail("A saved volume is already named \"$name\". Choose another name.", CODE_USAGE);
+        }
+        if ($options['file'] === '' || $options['file'][0] !== '/') {
+            throw new Fail('The path of the volume file must start with /.', CODE_USAGE);
+        }
+        $saved = false;
+        $volume = [
+            'file' => $options['file'], 'mount_at' => "/mnt/addons/$name", 'read_only' => false,
+            'hidden' => false, 'dependents' => [], 'share' => null,
+        ];
+    } else {
+        if (count($args) !== 1) {
+            throw new Fail('Usage: vcmount mount <name> [--read-only]', CODE_USAGE);
+        }
+        $name = $args[0];
+        if (!preg_match(NAME_PATTERN, $name)) {
+            throw new Fail('That is not a valid volume name.', CODE_USAGE);
+        }
+        if (!isset($config[$name])) {
+            throw new Fail("There is no saved volume named \"$name\".", CODE_USAGE);
+        }
+        $saved = true;
+        $volume = $config[$name];
+    }
+    if ($volume['hidden']) {
+        throw new Fail('Hidden volumes are not built yet.', CODE_USAGE);
+    }
+    $read_only = $volume['read_only'] || $options['read_only'];
+
+    // The web page adds --over-http when the password came over plain HTTP.
+    if ($options['over_http'] && setting('require_https', SETTINGS['require_https'])) {
+        throw new Fail('Refused: the setting "require HTTPS" is on. Open the page over HTTPS to unlock.', CODE_REFUSED);
+    }
+
+    $lock = take_lock();
+    try {
+        do_mount($name, $volume['file'], $volume['mount_at'], $read_only);
+    } catch (Fail $e) {
+        if ($saved) {
+            $reasons = [
+                CODE_UNLOCK_FAILED => 'could not unlock',
+                CODE_REFUSED => 'refused by a safety check',
+                CODE_FILESYSTEM => 'filesystem could not be mounted',
+            ];
+            log_event("mount of \"$name\" failed: " . ($reasons[$e->getCode()] ?? 'error'));
+        }
+        throw $e;
+    }
+    $failed = [];
+    $share_error = null;
+    if ($saved) {
+        log_event("mounted \"$name\"" . ($read_only ? ' read-only' : ''));
+        // The share comes before the dependents; a share that fails does not
+        // hold them back.
+        if ($volume['share'] !== null) {
+            try {
+                add_share($name, $volume['share'], $volume['mount_at'], $read_only);
+                log_event("shared \"$name\" over SMB");
+            } catch (Fail $e) {
+                $share_error = $e->getMessage();
+                log_event("share of \"$name\" could not be added", true);
+            }
+        }
+        $failed = start_dependents($name, $volume['dependents']);
+    }
+    $code = $share_error !== null ? CODE_SHARE : ($failed === [] ? CODE_OK : CODE_DEPENDENT);
+
+    if ($json) {
+        $v = describe($name, $saved ? $volume : null, live_volumes()[$name] ?? null);
+        echo json_encode(
+            ['ok' => true, 'code' => $code, 'volume' => $v, 'share_error' => $share_error, 'failed_dependents' => $failed],
+            JSON_UNESCAPED_SLASHES
+        ), "\n";
+        return $code;
+    }
+    echo "Mounted \"$name\" at {$volume['mount_at']}", $read_only ? ' (read-only).' : '.', "\n";
+    if ($share_error !== null) {
+        fwrite(STDERR, $share_error . "\n");
+    } elseif ($saved && $volume['share'] !== null) {
+        echo 'Shared as \\\\', php_uname('n'), '\\', $name, ".\n";
+    }
+    foreach ($failed as $f) {
+        fwrite(STDERR, "Dependent \"{$f['container']}\" could not be started: {$f['reason']}\n");
+    }
+    return $code;
+}
+
+/** How a program is named to the user: its name and process number. */
+function program_label(string $proc_dir): string
+{
+    return trim((string) @file_get_contents("$proc_dir/comm")) . ' (process ' . basename($proc_dir) . ')';
+}
+
+/**
+ * Which programs on the server hold something open below this folder?
+ * Returns, per program, its process number (pid) and its label. Never file
+ * names. Programs inside a container are not seen here; see mount_users().
+ */
+function holders(string $point): array
+{
+    $found = [];
+    $dirs = glob('/proc/[0-9]*', GLOB_ONLYDIR);
+    foreach ($dirs === false ? [] : $dirs as $dir) {
+        $fds = glob("$dir/fd/*");
+        $links = array_merge(["$dir/cwd", "$dir/root"], $fds === false ? [] : $fds);
+        foreach ($links as $link) {
+            $target = @readlink($link);
+            if ($target === false) {
+                continue;
+            }
+            if ($target === $point || strncmp($target, "$point/", strlen($point) + 1) === 0) {
+                $found[] = ['pid' => (int) basename($dir), 'label' => program_label($dir)];
+                break;
+            }
+        }
+    }
+    return $found;
+}
+
+/**
+ * Who still has this device mounted? Asked after the volume was dismounted on
+ * the server itself: what is left then are containers that were given a
+ * folder of the volume, and they keep the volume from being locked.
+ *
+ * $device_number is the kernel's number of the device, such as "254:3".
+ * Returns 'containers' (Docker ID => label) and 'programs' (labels of
+ * programs that are not inside a container).
+ */
+function mount_users(string $device_number): array
+{
+    $ids = [];
+    $programs = [];
+    $dirs = glob('/proc/[0-9]*', GLOB_ONLYDIR);
+    foreach ($dirs === false ? [] : $dirs as $dir) {
+        $lines = @file("$dir/mountinfo", FILE_IGNORE_NEW_LINES);
+        $uses = false;
+        foreach ($lines === false ? [] : $lines as $line) {
+            // The third field of each line is the device number.
+            if ((explode(' ', $line, 4)[2] ?? '') === $device_number) {
+                $uses = true;
+                break;
+            }
+        }
+        if (!$uses) {
+            continue;
+        }
+        // A program inside a container carries the container's ID in its cgroup.
+        if (preg_match('/[0-9a-f]{64}/', (string) @file_get_contents("$dir/cgroup"), $m)) {
+            $ids[$m[0]] = true;
+        } else {
+            $programs[] = program_label($dir);
+        }
+    }
+
+    $containers = [];
+    foreach (array_keys($ids) as $id) {
+        $id = (string) $id;
+        $r = run([program('docker'), 'inspect', '--type', 'container', '--format', '{{.Name}}', $id], TOOL_TIMEOUT);
+        $label = $r['code'] === 0 ? ltrim(trim($r['out']), '/') : substr($id, 0, 12);
+        $containers[$id] = "container $label";
+    }
+    return ['containers' => $containers, 'programs' => $programs];
+}
+
+/** The process numbers of this program and of everything that started it. */
+function own_ancestors(): array
+{
+    $pids = [];
+    $pid = getmypid();
+    while ($pid > 1 && !in_array($pid, $pids, true)) {
+        $pids[] = $pid;
+        $status = (string) @file_get_contents("/proc/$pid/status");
+        $pid = preg_match('/^PPid:\s+(\d+)/m', $status, $m) ? (int) $m[1] : 0;
+    }
+    return $pids;
+}
+
+/**
+ * Forced dismount only: end the programs that hold a volume open. Each gets
+ * the stop signal and FORCE_WAIT seconds; what is left is killed.
+ * $holders comes from holders(). Returns the labels of the programs ended.
+ */
+function end_programs(array $holders): array
+{
+    $own = own_ancestors();
+    $pids = [];
+    $labels = [];
+    foreach ($holders as $holder) {
+        if (in_array($holder['pid'], $own, true)) {
+            throw new Fail(
+                'Refused: this command was started from inside the volume. Change to another folder and try again.',
+                CODE_REFUSED
+            );
+        }
+        if ($holder['pid'] > 1) {
+            $pids[] = (string) $holder['pid'];
+            $labels[] = $holder['label'];
+        }
+    }
+    if ($pids === []) {
+        return [];
+    }
+
+    $alive = function (array $pids): array {
+        return array_values(array_filter($pids, function (string $pid): bool {
+            return is_dir("/proc/$pid");
+        }));
+    };
+    run(array_merge([program('kill'), '-TERM'], $pids), TOOL_TIMEOUT);
+    for ($i = 0; $i < FORCE_WAIT * 2 && $alive($pids) !== []; $i++) {
+        usleep(500000);
+    }
+    $left = $alive($pids);
+    if ($left !== []) {
+        run(array_merge([program('kill'), '-KILL'], $left), TOOL_TIMEOUT);
+        for ($i = 0; $i < 10 && $alive($left) !== []; $i++) {
+            usleep(200000);
+        }
+    }
+    return $labels;
+}
+
+/**
+ * Stop the dependents of one volume, then dismount and lock it
+ * (docs/DESIGN-engine.md, section 9). The caller holds the lock.
+ *
+ * $volume is the saved volume, or null for one that is not saved.
+ * $live is the volume's entry from live_volumes().
+ * $force: if the volume is still in use, end what holds it open and try
+ * again. Without it a busy volume stays mounted. Never "lazy" either way.
+ * Returns notes on what else happened, for example a dependent that was killed.
+ */
+function do_dismount(string $name, ?array $volume, ?array $live, bool $force): array
+{
+    $saved = $volume !== null;
+    $mapper = MAPPER_PREFIX . $name;
+    $dm = dm_name(MAPPER_DIR . '/' . $mapper);
+    $device_number = $dm === null ? '' : trim((string) @file_get_contents("/sys/block/$dm/dev"));
+
+    // First the share, so network clients let go of the volume (section 9b).
+    $notes = remove_share($name);
+    if ($notes !== [] && $saved) {
+        log_event("share of \"$name\" could not be removed cleanly", true);
+    }
+
+    // Then the dependents, in reverse order (DOC-4, DOC-5).
+    $notes = array_merge($notes, array_column(stop_dependents($name, $volume['dependents'] ?? []), 'message'));
+
+    // Dismount. A volume can be mounted in more than one place; take them all.
+    for ($round = 0; $round < 5 && $live !== null && $live['mounted_at'] !== null; $round++) {
+        $point = $live['mounted_at'];
+        $r = run([program('umount'), $point], TOOL_TIMEOUT);
+        if ($r['code'] !== 0 && $force) {
+            $ended = end_programs(holders($point));
+            if ($ended !== []) {
+                $notes[] = 'Forced: ended ' . implode(', ', $ended) . '.';
+                if ($saved) {
+                    log_event("dismount of \"$name\" forced: ended " . implode(', ', $ended), true);
+                }
+                $r = run([program('umount'), $point], TOOL_TIMEOUT);
+            }
+        }
+        if ($r['code'] !== 0) {
+            $fail = new Fail(
+                "Dismount aborted: \"$name\" is still in use. It stays mounted"
+                . ($force ? ", although force was used.\n" : "; nothing was forced.\n") . trim($r['err']),
+                CODE_BUSY
+            );
+            $programs = array_column(holders($point), 'label');
+            $fail->details = ['programs' => $programs];
+            if ($saved) {
+                // Program names and process numbers only, never file names.
+                log_event(
+                    "dismount of \"$name\" aborted: still in use"
+                    . ($programs === [] ? '' : ' by ' . implode(', ', $programs)),
+                    true
+                );
+            }
+            throw $fail;
+        }
+        // Remove the empty folder, but only where this plugin creates them.
+        if (strncmp($point, '/mnt/addons/', 12) === 0) {
+            @rmdir($point);
+        }
+        $live = live_volumes()[$name] ?? null;
+    }
+
+    // Lock. A container that was given a folder of the volume still has it
+    // mounted and keeps it from being locked.
+    $locked = lock_again($mapper);
+    $users = ['containers' => [], 'programs' => []];
+    if (!$locked && $device_number !== '') {
+        $users = mount_users($device_number);
+        if ($force && $users['containers'] !== []) {
+            foreach (array_keys($users['containers']) as $id) {
+                run([program('docker'), 'stop', '-t', (string) FORCE_WAIT, (string) $id], FORCE_WAIT + 30);
+            }
+            $stopped = implode(', ', $users['containers']);
+            $notes[] = "Forced: stopped $stopped.";
+            if ($saved) {
+                log_event("dismount of \"$name\" forced: stopped $stopped", true);
+            }
+            $locked = lock_again($mapper);
+            if (!$locked) {
+                $users = mount_users($device_number);
+            }
+        }
+    }
+    if (!$locked) {
+        if ($saved) {
+            log_event("\"$name\" was dismounted but could not be locked", true);
+        }
+        $fail = new Fail("\"$name\" was dismounted, but it could not be locked. Try again.", CODE_BUSY);
+        $fail->details = ['programs' => array_merge(array_values($users['containers']), $users['programs'])];
+        throw $fail;
+    }
+    if ($saved) {
+        log_event("dismounted \"$name\"");
+    }
+    return $notes;
+}
+
+/**
+ * Dismount and lock every volume that is unlocked or mounted, one after the
+ * other. Used by the array-stop hook. A volume that is still in use stays
+ * mounted and the others are still dismounted; the result is then code 5.
+ */
+function dismount_all(bool $json, bool $force): int
+{
+    // A fault in the configuration must not keep volumes mounted. Without the
+    // configuration every volume counts as "not saved", so nothing is logged.
+    try {
+        $config = load_config();
+    } catch (Fail $e) {
+        $config = [];
+    }
+
+    $lock = take_lock();
+    $results = [];
+    $failed = false;
+    foreach (live_volumes() as $name => $live) {
+        $name = (string) $name;
+        try {
+            $notes = do_dismount($name, $config[$name] ?? null, $live, $force);
+            $results[] = [
+                'name' => $name,
+                'ok' => true,
+                'message' => "Dismounted and locked \"$name\".",
+                'notes' => $notes,
+            ];
+        } catch (Fail $e) {
+            $failed = true;
+            $results[] = [
+                'name' => $name,
+                'ok' => false,
+                'code' => $e->getCode(),
+                'error' => $e->getMessage(),
+                'details' => $e->details,
+            ];
+        }
+    }
+    $code = $failed ? CODE_BUSY : CODE_OK;
+
+    if ($json) {
+        echo json_encode(['ok' => !$failed, 'code' => $code, 'results' => $results], JSON_UNESCAPED_SLASHES), "\n";
+        return $code;
+    }
+    if ($results === []) {
+        echo "No volume is mounted.\n";
+    }
+    foreach ($results as $result) {
+        if ($result['ok']) {
+            foreach ($result['notes'] as $note) {
+                echo $note, "\n";
+            }
+            echo $result['message'], "\n";
+            continue;
+        }
+        fwrite(STDERR, $result['error'] . "\n");
+        foreach ($result['details']['programs'] ?? [] as $program) {
+            fwrite(STDERR, "  held open by: $program\n");
+        }
+    }
+    return $code;
+}
+
+function command_dismount(array $args, array $options, bool $json): int
+{
+    if ($options['all']) {
+        if ($args !== []) {
+            throw new Fail('Usage: vcmount dismount --all [--force]', CODE_USAGE);
+        }
+        // --array-stop is given by the unmounting_disks hook. Force is then on
+        // unless the setting "force_at_array_stop" turns it off (LIFE-10).
+        $force = $options['force'] || ($options['array_stop'] && setting('force_at_array_stop', SETTINGS['force_at_array_stop']));
+        return dismount_all($json, $force);
+    }
+    if (count($args) !== 1) {
+        throw new Fail('Usage: vcmount dismount <name> [--force]', CODE_USAGE);
+    }
+    $name = $args[0];
+    if (!preg_match(NAME_PATTERN, $name)) {
+        throw new Fail('That is not a valid volume name.', CODE_USAGE);
+    }
+    $volume = load_config()[$name] ?? null;
+    $saved = $volume !== null;
+
+    $lock = take_lock();
+    $live = live_volumes()[$name] ?? null;
+    if ($live === null) {
+        if (!$saved) {
+            throw new Fail("There is no volume named \"$name\".", CODE_USAGE);
+        }
+        report($json, $name, "\"$name\" is already locked.");
+        return CODE_OK;
+    }
+    $notes = do_dismount($name, $volume, $live, $options['force']);
+    report($json, $name, "Dismounted and locked \"$name\".", $notes);
+    return CODE_OK;
+}
+
+/**
+ * Stop the dependents of every saved volume that is unlocked or mounted. The
+ * volumes stay mounted. Used by the stopping_docker hook, so that dependents
+ * get their own grace period before Unraid stops all containers.
+ */
+function command_stop_dependents(array $args, array $options, bool $json): int
+{
+    if (!$options['all'] || $args !== []) {
+        throw new Fail('Usage: vcmount stop-dependents --all', CODE_USAGE);
+    }
+    $config = load_config();
+    $lock = take_lock();
+    $live = live_volumes();
+    $results = [];
+    foreach ($config as $name => $volume) {
+        if (isset($live[$name])) {
+            $results = array_merge($results, stop_dependents((string) $name, $volume['dependents']));
+        }
+    }
+    $failed = in_array('failed', array_column($results, 'result'), true);
+    $code = $failed ? CODE_BUSY : CODE_OK;
+
+    if ($json) {
+        echo json_encode(['ok' => !$failed, 'code' => $code, 'results' => $results], JSON_UNESCAPED_SLASHES), "\n";
+        return $code;
+    }
+    if ($results === []) {
+        echo "No dependent was running.\n";
+    }
+    foreach ($results as $result) {
+        echo $result['message'], "\n";
+    }
+    return $code;
+}
+
+/**
+ * Make the SMB shares match the mounted volumes (section 9b): add the share of
+ * every mounted saved volume that should have one, and remove every share of
+ * ours that no mounted volume needs. Also puts back include lines that another
+ * plugin lost.
+ */
+function command_repair_shares(array $args, bool $json): int
+{
+    if ($args !== []) {
+        throw new Fail('Usage: vcmount repair-shares', CODE_USAGE);
+    }
+    $config = load_config();
+    $lock = take_lock();
+    $live = live_volumes();
+    $notes = [];
+    $failed = false;
+
+    $wanted = [];
+    foreach ($config as $name => $volume) {
+        $name = (string) $name;
+        $point = $live[$name]['mounted_at'] ?? null;
+        if ($volume['share'] === null || $point === null) {
+            continue;
+        }
+        $wanted[$name] = true;
+        $read_only = (bool) $live[$name]['read_only'];
+        $text = share_text($name, $volume['share'], $point, $read_only);
+        if (share_active($name) && @file_get_contents(share_file($name)) === $text) {
+            continue;
+        }
+        try {
+            add_share($name, $volume['share'], $point, $read_only);
+            $notes[] = "Added the share of \"$name\".";
+            log_event("share of \"$name\" repaired");
+        } catch (Fail $e) {
+            $failed = true;
+            $notes[] = $e->getMessage();
+        }
+    }
+
+    // Our own leftovers: share files, and include lines that name our folder.
+    $names = [];
+    foreach (glob(SHARE_DIR . '/*.conf') ?: [] as $file) {
+        $names[] = basename($file, '.conf');
+    }
+    $prefix = 'include = ' . SHARE_DIR . '/';
+    foreach (hook_lines() as $line) {
+        $line = trim($line);
+        if (strncmp($line, $prefix, strlen($prefix)) === 0 && substr($line, -5) === '.conf') {
+            $names[] = substr($line, strlen($prefix), -5);
+        }
+    }
+    foreach (array_unique($names) as $name) {
+        if (isset($wanted[$name]) || !preg_match(NAME_PATTERN, $name)) {
+            continue;
+        }
+        $problems = remove_share($name);
+        $notes[] = "Removed the left-over share \"$name\".";
+        if ($problems !== []) {
+            $failed = true;
+            $notes = array_merge($notes, $problems);
+        }
+    }
+    $code = $failed ? CODE_SHARE : CODE_OK;
+
+    if ($json) {
+        echo json_encode(['ok' => !$failed, 'code' => $code, 'notes' => $notes], JSON_UNESCAPED_SLASHES), "\n";
+        return $code;
+    }
+    echo $notes === [] ? "The shares were already in order.\n" : implode("\n", $notes) . "\n";
+    return $code;
+}
+
+/**
+ * The choices the web forms offer: the Unraid users (for a share) and the
+ * Docker containers (for dependents). Changes nothing.
+ */
+function command_options(array $args, bool $json): int
+{
+    if ($args !== []) {
+        throw new Fail('Usage: vcmount options', CODE_USAGE);
+    }
+    // Unraid's own users have user numbers from 1000 up.
+    $users = [];
+    foreach (@file('/etc/passwd', FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+        $fields = explode(':', $line);
+        $uid = (int) ($fields[2] ?? -1);
+        if ($uid >= 1000 && $uid < 60000 && preg_match(USER_PATTERN, $fields[0])) {
+            $users[] = $fields[0];
+        }
+    }
+    sort($users);
+
+    $containers = [];
+    $notes = [];
+    if (docker_ready()) {
+        $r = run([program('docker'), 'ps', '-a', '--format', '{{.Names}}'], TOOL_TIMEOUT);
+        foreach (preg_split('/\n/', trim($r['out'])) as $line) {
+            if (preg_match(CONTAINER_PATTERN, $line)) {
+                $containers[] = $line;
+            }
+        }
+        sort($containers);
+    } else {
+        $notes[] = 'The Docker service is not running, so no containers can be listed.';
+    }
+
+    if ($json) {
+        echo json_encode(['ok' => true, 'users' => $users, 'containers' => $containers, 'notes' => $notes],
+            JSON_UNESCAPED_SLASHES), "\n";
+        return CODE_OK;
+    }
+    echo 'Users:      ', $users === [] ? '-' : implode(', ', $users), "\n";
+    echo 'Containers: ', $containers === [] ? '-' : implode(', ', $containers), "\n";
+    foreach ($notes as $note) {
+        echo $note, "\n";
+    }
+    return CODE_OK;
+}
+
+/** File Activity (PRIV-3): where it is installed and where it keeps its settings. */
+const FILE_ACTIVITY_DIR = '/usr/local/emhttp/plugins/file.activity';
+const FILE_ACTIVITY_CONFIG = '/boot/config/plugins/file.activity/config.json';
+
+/**
+ * The pattern for one folder, without the leading "^/" and the closing
+ * "(/|$)", so several can be joined into one line. Inside a user share Unraid
+ * has two spellings for the same file, /mnt/user/<share>/... and
+ * /mnt/disk3/<share>/..., so the second part of such a path matches any name.
+ * Only the characters that mean something in a pattern are escaped, so a part
+ * reads like the path (throwaway-ntfs, not throwaway\-ntfs).
+ */
+function exclusion_part(string $dir): string
+{
+    $parts = array_values(array_filter(explode('/', $dir), 'strlen'));
+    $special = str_split('\\.+*?()|[]{}^$');
+    $quoted = array_map(fn($p) => implode('', array_map(
+        fn($c) => in_array($c, $special, true) ? '\\' . $c : $c, str_split($p))), $parts);
+    if (count($parts) >= 3 && $parts[0] === 'mnt' && in_array($parts[1], ['user', 'user0'], true)) {
+        $quoted[1] = '[^/]+';
+    }
+    return implode('/', $quoted);
+}
+
+/**
+ * One File Activity exclusion line for all the folders: File Activity takes
+ * one pattern per entry, so one line is easiest to add. The alternatives are
+ * joined with "|", and a shared "mnt/" is put in front of the brackets:
+ * ^/mnt/(addons|[^/]+/data/veracrypt)(/|$). File Activity finds a pattern
+ * anywhere in a path (its own defaults, such as "(?i)appdata", have no
+ * anchors), so the line starts with ^ and ends at a folder boundary.
+ */
+function exclusion_line(array $parts): string
+{
+    $parts = array_values(array_unique($parts));
+    $all_mnt = array_filter($parts, fn($p) => strncmp($p, 'mnt/', 4) === 0) === $parts;
+    $prefix = $all_mnt ? 'mnt/' : '';
+    $inner = array_map(fn($p) => $all_mnt ? substr($p, 4) : $p, $parts);
+    $body = count($inner) === 1 ? $inner[0] : '(' . implode('|', $inner) . ')';
+    return '^/' . $prefix . $body . '(/|$)';
+}
+
+/**
+ * Does one of File Activity's patterns already cover a path? File Activity
+ * uses RE2, which PHP does not have; for the patterns that matter here (plain
+ * text, ^, (?i), [^/]+ and the like) PCRE behaves the same. A pattern PCRE
+ * cannot read counts as not covering, so the worst case is a line too many.
+ */
+function excluded_by(array $patterns, string $path): bool
+{
+    foreach ($patterns as $pattern) {
+        if (is_string($pattern) && $pattern !== '' && @preg_match('~' . str_replace('~', '\~', $pattern) . '~', $path) === 1) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Check for activity-logging plugins (PRIV-3). For every saved volume, its
+ * mount point (most important: otherwise the volume's content is logged) and
+ * the folder holding its volume file should be excluded in File Activity.
+ * Reads File Activity's settings; never changes them.
+ */
+function command_privacy(array $args, bool $json): int
+{
+    if ($args !== []) {
+        throw new Fail('Usage: vcmount privacy', CODE_USAGE);
+    }
+    $installed = is_dir(FILE_ACTIVITY_DIR);
+    $readable = false;
+    $patterns = [];
+    if ($installed && is_file(FILE_ACTIVITY_CONFIG)) {
+        $data = json_decode((string) @file_get_contents(FILE_ACTIVITY_CONFIG), true);
+        if (is_array($data) && is_array($data['exclusions'] ?? null)) {
+            $readable = true;
+            $patterns = $data['exclusions'];
+        }
+    }
+
+    // The folders to exclude. Every mount point under /mnt/addons is covered by
+    // excluding all of /mnt/addons: it holds only mounts made by plugins, and it
+    // also covers volumes added later. Each folder comes with sample paths that
+    // show whether File Activity already leaves it out: one inside the folder,
+    // and for a user share also its per-disk spelling.
+    $folders = [];
+    foreach (load_config() as $volume) {
+        $mount = strncmp($volume['mount_at'], '/mnt/addons/', 12) === 0 ? '/mnt/addons' : $volume['mount_at'];
+        foreach ([$mount, dirname($volume['file'])] as $dir) {
+            $folders[rtrim($dir, '/')] = true;
+        }
+    }
+    $parts = [];
+    $missing = [];
+    foreach (array_keys($folders) as $dir) {
+        $parts[] = exclusion_part($dir);
+        $samples = [$dir . '/file'];
+        if (preg_match('#^/mnt/user0?/(.+)$#', $dir, $m)) {
+            $samples[] = '/mnt/disk1/' . $m[1] . '/file';
+        }
+        $covered = $readable;
+        foreach ($samples as $sample) {
+            $covered = $covered && excluded_by($patterns, $sample);
+        }
+        if (!$covered) {
+            $missing[] = $dir;
+        }
+    }
+    $line = $parts === [] ? '' : exclusion_line($parts);
+
+    if ($json) {
+        echo json_encode(['ok' => true, 'file_activity' => [
+            'installed' => $installed,
+            'settings_read' => $readable,
+            'line' => $line,
+            'missing' => $missing,
+        ]], JSON_UNESCAPED_SLASHES), "\n";
+        return CODE_OK;
+    }
+    if (!$installed) {
+        echo "File Activity is not installed.\n";
+        return CODE_OK;
+    }
+    if (!$readable) {
+        echo "File Activity is installed, but its settings could not be read.\n";
+    }
+    if ($missing === []) {
+        echo "File Activity already leaves out every mount point and volume folder.\n";
+        return CODE_OK;
+    }
+    echo "File Activity is installed and can record file names from these folders:\n";
+    foreach ($missing as $dir) {
+        echo '  ', $dir, "\n";
+    }
+    echo "Add this line as one entry to its Exclusions (Tools > File Activity, tab Settings).\n",
+         "It covers every volume, so it can replace earlier entries made for them:\n",
+         '  ', $line, "\n";
+    return CODE_OK;
+}
+
+/**
+ * Is another vcmount action running right now? Tries the lock without waiting
+ * and lets it go at once. The web page uses this after a lost answer.
+ */
+function command_busy(array $args, bool $json): int
+{
+    if ($args !== []) {
+        throw new Fail('Usage: vcmount busy', CODE_USAGE);
+    }
+    $handle = @fopen(LOCK_FILE, 'c');
+    $busy = $handle !== false && !flock($handle, LOCK_EX | LOCK_NB);
+    if ($handle !== false) {
+        fclose($handle);   // also lets go of the lock if we got it
+    }
+    if ($json) {
+        echo json_encode(['ok' => true, 'busy' => $busy]), "\n";
+    } else {
+        echo $busy ? "Another vcmount action is running.\n" : "No vcmount action is running.\n";
+    }
+    return CODE_OK;
+}
+
+/**
+ * The fingerprint of the settings file's content, or "none" when there is no
+ * file. The web page sends it back when saving, so a change made meanwhile
+ * elsewhere (another browser tab) is not overwritten unseen.
+ */
+function revision_of(?string $content): string
+{
+    return $content === null ? 'none' : hash('sha256', $content);
+}
+
+/** The settings file's content, or null when there is none. */
+function config_content(): ?string
+{
+    $path = config_path();
+    if (!is_file($path)) {
+        return null;
+    }
+    $content = @file_get_contents($path);
+    if ($content === false) {
+        throw new Fail("Could not read $path.", CODE_USAGE);
+    }
+    return $content;
+}
+
+/** Show the saved settings as they are stored, with their revision. Changes nothing. */
+function command_config(array $args, bool $json): int
+{
+    if ($args !== []) {
+        throw new Fail('Usage: vcmount config', CODE_USAGE);
+    }
+    $content = config_content();
+    $checked = $content === null
+        ? ['volumes' => [], 'settings' => SETTINGS]
+        : check_config(json_decode($content, true), 'The configuration file ' . config_path());
+    $out = [
+        'ok' => true,
+        'revision' => revision_of($content),
+        'settings' => $checked['settings'],
+        'volumes' => array_values(array_map('volume_for_file', $checked['volumes'])),
+    ];
+    if ($json) {
+        echo json_encode($out, JSON_UNESCAPED_SLASHES), "\n";
+    } else {
+        unset($out['ok']);
+        echo json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), "\n";
+    }
+    return CODE_OK;
+}
+
+/** One volume as it is written to the file: only what differs from the defaults. */
+function volume_for_file(array $v): array
+{
+    $out = ['name' => $v['name']];
+    if ($v['display_name'] !== $v['name']) {
+        $out['display_name'] = $v['display_name'];
+    }
+    $out['file'] = $v['file'];
+    if ($v['mount_at'] !== '/mnt/addons/' . $v['name']) {
+        $out['mount_at'] = $v['mount_at'];
+    }
+    if ($v['read_only']) {
+        $out['read_only'] = true;
+    }
+    if ($v['hidden']) {
+        $out['hidden'] = true;
+    }
+    if ($v['share'] !== null) {
+        $out['share'] = $v['share'];
+    }
+    if ($v['dependents'] !== []) {
+        $out['dependents'] = $v['dependents'];
+    }
+    return $out;
+}
+
+/**
+ * Check new settings and save them (Decision U1). They arrive as JSON on
+ * standard input, are checked with the same rules as when they are read, and
+ * replace the file in one step. The only place where the plugin writes the
+ * flash drive at runtime (Decision D4). Changes to a mounted volume take
+ * effect at its next mount.
+ */
+function command_save_config(array $args, ?string $revision, bool $json): int
+{
+    if ($args !== []) {
+        throw new Fail('Usage: vcmount save-config [--revision <r>] < settings.json', CODE_USAGE);
+    }
+    if ($revision !== null && !preg_match('/\A([0-9a-f]{64}|none)\z/', $revision)) {
+        throw new Fail('That is not a valid revision.', CODE_USAGE);
+    }
+    $text = stream_get_contents(STDIN, MAX_CONFIG_SIZE + 1);
+    if ($text === false || strlen($text) > MAX_CONFIG_SIZE) {
+        throw new Fail('The new settings could not be read or are too large.', CODE_USAGE);
+    }
+    $checked = check_config(json_decode($text, true), 'The new configuration');
+
+    $out = [
+        'settings' => $checked['settings'],
+        'volumes' => array_values(array_map('volume_for_file', $checked['volumes'])),
+    ];
+    $content = json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+
+    $lock = take_lock();
+
+    // Refuse to overwrite a change made meanwhile elsewhere.
+    $current = config_content();
+    if ($revision !== null && $revision !== revision_of($current)) {
+        throw new Fail('The settings were changed elsewhere in the meantime, perhaps in another browser tab. '
+            . 'Reload them and make your change again.', CODE_REFUSED);
+    }
+
+    // Decision D3: a mounted volume may not be renamed or removed. It would turn
+    // into a volume that is not saved, and its dependents would no longer be
+    // stopped when it is dismounted.
+    try {
+        $old = $current === null ? [] : check_config(json_decode($current, true), 'The saved settings')['volumes'];
+    } catch (Fail $e) {
+        $old = [];   // a broken old file must not block saving a good new one
+    }
+    foreach (array_keys(live_volumes()) as $name) {
+        $name = (string) $name;
+        if (isset($old[$name]) && !isset($checked['volumes'][$name])) {
+            throw new Fail("\"$name\" is mounted. Dismount it before you rename or remove it.", CODE_REFUSED);
+        }
+    }
+
+    $path = config_path();
+    $dir = dirname($path);
+    if (!is_dir($dir) && !@mkdir($dir, 0777, true)) {
+        throw new Fail("Could not create the folder $dir.", CODE_USAGE);
+    }
+    $temp = "$path.new";
+    if (@file_put_contents($temp, $content) === false || !@rename($temp, $path)) {
+        @unlink($temp);
+        throw new Fail("Could not write $path. The old settings are unchanged.", CODE_USAGE);
+    }
+    log_event('settings saved');
+
+    if ($json) {
+        echo json_encode(['ok' => true, 'volumes' => count($out['volumes']), 'revision' => revision_of($content)],
+            JSON_UNESCAPED_SLASHES), "\n";
+    } else {
+        echo 'Saved the settings (', count($out['volumes']), " volumes).\n";
+    }
+    return CODE_OK;
+}
+
+/** Split the command line into plain arguments and options. */
+function parse_args(array $args): array
+{
+    $flags = [
+        '--json' => 'json', '--read-only' => 'read_only', '--all' => 'all',
+        '--force' => 'force', '--array-stop' => 'array_stop', '--over-http' => 'over_http',
+    ];
+    $values = ['--file' => 'file', '--name' => 'name', '--revision' => 'revision'];
+    $options = [
+        'json' => false, 'read_only' => false, 'all' => false, 'force' => false, 'array_stop' => false,
+        'over_http' => false, 'file' => null, 'name' => null, 'revision' => null,
+    ];
+    $plain = [];
+    while ($args !== []) {
+        $arg = array_shift($args);
+        if (isset($flags[$arg])) {
+            $options[$flags[$arg]] = true;
+        } elseif (isset($values[$arg])) {
+            if ($args === []) {
+                throw new Fail("$arg needs a value.", CODE_USAGE);
+            }
+            $options[$values[$arg]] = array_shift($args);
+        } elseif (strncmp($arg, '--', 2) === 0 && $arg !== '--help') {
+            throw new Fail("Unknown option $arg.", CODE_USAGE);
+        } else {
+            $plain[] = $arg;
+        }
+    }
+    return [$plain, $options];
+}
+
+function main(array $argv): int
+{
+    $json = in_array('--json', $argv, true);
+    try {
+        [$args, $options] = parse_args(array_slice($argv, 1));
+        $command = array_shift($args);
+        switch ($command) {
+            case 'list':
+                if ($args !== []) {
+                    throw new Fail('Usage: vcmount list', CODE_USAGE);
+                }
+                return command_list($json);
+            case 'status':
+                return command_status($args, $json);
+            case 'mount':
+                return command_mount($args, $options, $json);
+            case 'dismount':
+                return command_dismount($args, $options, $json);
+            case 'stop-dependents':
+                return command_stop_dependents($args, $options, $json);
+            case 'repair-shares':
+                return command_repair_shares($args, $json);
+            case 'options':
+                return command_options($args, $json);
+            case 'busy':
+                return command_busy($args, $json);
+            case 'privacy':
+                return command_privacy($args, $json);
+            case 'config':
+                return command_config($args, $json);
+            case 'save-config':
+                return command_save_config($args, $options['revision'], $json);
+            case 'help':
+            case '--help':
+                echo USAGE, "\n";
+                return CODE_OK;
+            default:
+                throw new Fail(USAGE, CODE_USAGE);
+        }
+    } catch (Fail $e) {
+        if ($json) {
+            echo json_encode(
+                ['ok' => false, 'code' => $e->getCode(), 'error' => $e->getMessage(), 'details' => $e->details],
+                JSON_UNESCAPED_SLASHES
+            ), "\n";
+        } else {
+            fwrite(STDERR, $e->getMessage() . "\n");
+            foreach ($e->details['programs'] ?? [] as $program) {
+                fwrite(STDERR, "  held open by: $program\n");
+            }
+        }
+        return $e->getCode();
+    }
+}
+
+exit(main($argv));

@@ -1,0 +1,4 @@
+#!/bin/bash
+# vcmount: the plugin's command-line tool (CLI-1), on the PATH for use over SSH.
+# The engine itself lives in the plugin folder; this only hands over to it.
+exec /usr/local/emhttp/plugins/veracrypt.mount/scripts/vcmount "$@"

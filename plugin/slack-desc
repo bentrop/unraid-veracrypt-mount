@@ -1,0 +1,12 @@
+               |-----handy-ruler------------------------------------------------------|
+veracrypt.mount: veracrypt.mount (VeraCrypt Mount for Unraid)
+veracrypt.mount:
+veracrypt.mount: Mounts VeraCrypt volumes with the built-in cryptsetup, shares them
+veracrypt.mount: over SMB and starts and stops the Docker containers that depend on
+veracrypt.mount: them. Command-line tool: vcmount.
+veracrypt.mount:
+veracrypt.mount: https://github.com/bentrop/unraid-veracrypt-mount
+veracrypt.mount:
+veracrypt.mount:
+veracrypt.mount:
+veracrypt.mount:

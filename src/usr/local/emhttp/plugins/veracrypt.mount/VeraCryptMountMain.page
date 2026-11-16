@@ -1,0 +1,55 @@
+Menu="Main:3"
+Title="VeraCrypt Volumes"
+Tag="lock"
+Cond="(json_decode((string)@file_get_contents('/boot/config/plugins/veracrypt.mount/volumes.json'), true)['settings']['show_on_main'] ?? false) === true"
+Markdown="false"
+---
+<?php
+/*
+ * The optional section on the Main page (UI-3), built like Unraid's own device
+ * tables there and placed after Boot Device (same menu number, later name).
+ * A row starts as a disk's row does: the folder icon that opens the mounted
+ * volume in Unraid's file manager, then the lock, which is status and control
+ * in one as the coloured dot is for a disk (it mounts or dismounts), then the
+ * name.
+ *
+ * The Cond line above shows the section only when the setting "show on the
+ * Main page" is on. It reads that one setting straight from the settings file
+ * on the flash drive, because Unraid evaluates it while it
+ * builds the page, before any script of ours runs. Everything else goes through
+ * include/action.php and the engine, with the same script and password dialog
+ * as the Volumes tab.
+ */
+$vcm = '/plugins/veracrypt.mount';
+?>
+<link type="text/css" rel="stylesheet" href="<?php autov("$vcm/css/vcmount.css") ?>">
+<div class="TableContainer">
+  <table class="unraid disk_status vcm-main">
+    <!-- The ten columns of Unraid's device tables, so everything lines up with
+         the sections above: Device, Identification, Temp, Reads, Writes, Errors,
+         FS, Size, Used, Free. "Mounted at" takes the room of three of them. -->
+    <thead>
+      <tr>
+        <td>Volume</td>
+        <td>Volume file</td>
+        <td colspan="3">Mounted at</td>
+        <td>Share</td>
+        <td>FS</td>
+        <td>Size</td>
+        <td>Used</td>
+        <td>Free</td>
+      </tr>
+    </thead>
+    <tbody id="vcm-rows" data-main>
+      <tr><td colspan="10"></td></tr>
+    </tbody>
+  </table>
+</div>
+<script>
+// Unraid's Main page puts its "Toggle reads/writes display" icon into every
+// section title that is not marked like this (ArrayOperation.page). This
+// section shows no reads or writes, so it opts out, as Unraid provides for.
+$('table.vcm-main').closest('.TableContainer').prevAll('div.title').first().addClass('disable_diskio');
+</script>
+<?php include '/usr/local/emhttp/plugins/veracrypt.mount/include/dialog.php'; ?>
+<script src="<?php autov("$vcm/js/vcmount.js") ?>"></script>

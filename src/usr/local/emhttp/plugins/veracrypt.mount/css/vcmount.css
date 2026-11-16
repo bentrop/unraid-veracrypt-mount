@@ -1,0 +1,149 @@
+/* VeraCrypt Mount: styles shared by the plugin's pages. Colours come from the
+   active Unraid theme wherever possible (UI-1). */
+
+.vcm-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+.vcm-table th { text-align: left; font-weight: normal; opacity: .7; padding: 6px 8px; }
+.vcm-table td { padding: 8px; border-top: 1px solid rgba(128, 128, 128, .25); vertical-align: middle; }
+.vcm-table td.vcm-empty { text-align: center; opacity: .7; }
+.vcm-table .vcm-sub { display: block; font-size: .85em; opacity: .7; }
+.vcm-table input[type=button] { margin: 0 4px 0 0; }
+
+.vcm-state { white-space: nowrap; }
+.vcm-state::before { content: "\25CF\00a0"; }
+.vcm-state.mounted::before { color: #3c9a3c; }
+.vcm-state.locked::before { color: #888; }
+.vcm-state.unlocked::before { color: #d08a00; }
+
+.vcm-buttons { margin-top: 12px; }
+
+.vcm-warning { border-left: 4px solid #d08a00; background: rgba(208, 138, 0, .12); padding: 8px 12px; margin: 8px 0; }
+.vcm-error { border-left: 4px solid #c0392b; background: rgba(192, 57, 43, .12); padding: 8px 12px; margin: 8px 0; }
+.vcm-note { font-size: .9em; opacity: .7; margin: 4px 0 8px; }
+
+/* The mount dialog. */
+.vcm-modal { position: fixed; inset: 0; background: rgba(0, 0, 0, .5); z-index: 10000;
+             display: flex; align-items: center; justify-content: center; padding: 16px; }
+.vcm-modal[hidden] { display: none; }
+.vcm-box { background: var(--background-color, #fff); color: inherit; border-radius: 6px;
+           padding: 16px 20px; width: 100%; max-width: 440px; box-shadow: 0 4px 24px rgba(0, 0, 0, .4); }
+.vcm-box h3 { margin-top: 0; }
+.vcm-box label { display: block; margin: 10px 0; }
+.vcm-box input[type=text], .vcm-box input[type=password] { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; }
+.vcm-box label.vcm-check { display: flex; align-items: center; gap: 6px; }
+
+.vcm-table td.vcm-actions { white-space: nowrap; }
+
+/* The edit panel. */
+#vcm-edit { max-width: 900px; }
+.vcm-form { display: grid; grid-template-columns: minmax(140px, 220px) 1fr; gap: 8px 16px; align-items: center; margin: 8px 0; }
+.vcm-form dt { opacity: .8; }
+.vcm-form dd { margin: 0; }
+.vcm-form input[type=text] { width: 100%; max-width: 420px; box-sizing: border-box; }
+.vcm-form .vcm-note { display: block; }
+.vcm-fold { border: 1px solid rgba(128, 128, 128, .3); border-radius: 4px; margin: 10px 0; padding: 0 12px; }
+.vcm-fold > summary { cursor: pointer; padding: 10px 0; font-weight: bold; list-style-position: inside; }
+.vcm-fold[open] > summary { border-bottom: 1px solid rgba(128, 128, 128, .2); margin-bottom: 8px; }
+.vcm-sum { float: right; font-weight: normal; opacity: .7; }
+.vcm-access { border-collapse: collapse; margin: 4px 0 8px; }
+.vcm-access th { text-align: left; font-weight: normal; opacity: .7; padding: 4px 16px 4px 0; }
+.vcm-access td { padding: 4px 16px 4px 0; }
+.vcm-deps { list-style: none; padding: 0; margin: 8px 0; }
+.vcm-dep { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding: 6px 8px;
+           border: 1px solid rgba(128, 128, 128, .25); border-radius: 4px; margin-bottom: 4px; }
+.vcm-dep input[type=number] { width: 4.5em; }
+.vcm-dep-name { min-width: 160px; font-weight: bold; }
+.vcm-handle { cursor: grab; opacity: .6; }
+/* The empty place a dragged dependent will drop into. */
+.vcm-dep.vcm-dep-gap { visibility: visible !important; border-style: dashed; opacity: .5; }
+#e-deps { padding: 4px 0; }
+.vcm-dep-remove { margin-left: auto; text-decoration: none; }
+
+/* Present for password managers, invisible to people. */
+.vcm-offscreen { position: absolute !important; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+
+@media (max-width: 760px) {
+  .vcm-form { grid-template-columns: 1fr; }
+  .vcm-sum { float: none; display: block; }
+  .vcm-table th:nth-child(4), .vcm-table td:nth-child(4),
+  .vcm-table th:nth-child(6), .vcm-table td:nth-child(6) { display: none; }
+}
+
+/* The breadcrumb, in Unraid's title bar like the file manager's, or in its own
+   line when there is no title bar. */
+.vcm-chevron { margin: 0 10px; font-size: .8em; }
+.vcm-crumb { margin: 8px 0 12px; font-size: 1.15em; }
+.vcm-crumb[hidden] { display: none; }
+.vcm-crumb-back { cursor: pointer; }
+.vcm-access select { width: auto; min-width: 160px; max-width: 260px; }
+.vcm-ro-hint { display: block; margin: 2px 0 0; }
+.vcm-ro-hint[hidden] { display: none; }
+
+/* The Dashboard tile. Columns, status dot and usage bar are Unraid's own (as in
+   the Array tile); only the name column is made wider. */
+tr.vcm-row td.vcm-empty { text-align: center; opacity: .7; }
+/* As wide as Device + Status of the Array tile, so Share, Status and Utilization
+   sit under its Temp, SMART and Utilization columns. Built like Unraid's span.w26. */
+span.vcm-col-name { min-width: 44%; max-width: 44%; display: inline-block; float: left; overflow: hidden; text-overflow: ellipsis; }
+tr.vcm-row span.vcm-col-name { white-space: nowrap; }
+.vcm-tile-icon.mounted { color: #3c9a3c; }
+.vcm-tile-icon.unlocked { color: #d08a00; }
+.vcm-tile-icon[role=button] { cursor: pointer; display: inline-block; padding: 4px 4px 4px 0; margin-left: 2px;
+                              transition: transform .15s ease-out, color .15s ease-out; transform-origin: left center; }
+.vcm-tile-icon[role=button]:hover, .vcm-tile-icon[role=button]:focus { color: #ff8c2f; transform: scale(1.2) rotate(8deg); outline: none; }
+.vcm-tile-icon[role=button]:active { transform: scale(1.1); }
+@media (prefers-reduced-motion: reduce) {
+  .vcm-tile-icon[role=button] { transition: none; }
+  .vcm-tile-icon[role=button]:hover, .vcm-tile-icon[role=button]:focus, .vcm-tile-icon[role=button]:active { transform: none; }
+}
+.vcm-ro { font-size: .8em; border: 1px solid currentColor; border-radius: 3px; padding: 0 3px; opacity: .7; }
+tbody.vcm-none { display: none !important; }
+.vcm-dim { opacity: .55; }
+svg.vcm-logo { flex: none; }
+
+/* The section on the Main page: Unraid's own device table. Its styles set the
+   widths by counting cells, which the wide "Mounted at" cell upsets, so the
+   widths of the cells after it are set here to the same values. */
+table.vcm-main td.vcm-empty { text-align: center; opacity: .7; }
+table.vcm-main tr > td:nth-child(3) { width: 22%; text-align: left; }
+table.vcm-main tr > td:nth-child(n + 4) { width: 7%; }
+table.vcm-main .vcm-tile-icon { margin-right: 6px; }
+
+/* PRIV-3: the File Activity exclusion line, ready to copy. */
+#vcm-privacy p { margin: 0 0 8px; }
+.vcm-privacy-line { width: 100%; max-width: 560px; box-sizing: border-box; font-family: monospace; }
+
+/* A volume being dismounted: its control spins and cannot be clicked. */
+.vcm-busy-icon { margin: 0 6px 0 2px; opacity: .7; }
+.vcm-tile-icon.vcm-busy { color: #d08a00; cursor: progress; }
+
+/* The Volumes tab: Unraid's table style, five columns of two lines each. */
+/* Unraid's disk_status rules right-align from the third column on; these win
+   because they are as specific and come later. */
+table.vcm-manage tr > td { vertical-align: middle; }
+table.vcm-manage tr > td:nth-child(1) { width: 36%; text-align: left; }
+table.vcm-manage tr > td:nth-child(2) { width: 20%; text-align: left; }
+table.vcm-manage tr > td:nth-child(3) { width: 14%; text-align: left; }
+table.vcm-manage tr > td:nth-child(4) { width: 16%; text-align: left; }
+table.vcm-manage tr > td:nth-child(5) { width: 14%; text-align: right; }
+table.vcm-manage tbody td { padding-top: 6px; padding-bottom: 6px; }
+.vcm-l1, .vcm-l2 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vcm-l1 { line-height: 1.6; }
+/* The Volume cell: folder and lock beside the two lines, centred on them. */
+.vcm-vol { display: flex; align-items: center; gap: 4px; }
+.vcm-vol-icons { flex: none; display: inline-flex; align-items: center; }
+.vcm-vol-icons a.view { margin: 0; }
+.vcm-vol-icons .vcm-tile-icon { margin-right: 0; }
+.vcm-vol-text { flex: 1; min-width: 0; }
+.vcm-l2 { font-size: .85em; opacity: .65; line-height: 1.4; }
+.vcm-bar { display: inline-block; width: 60%; max-width: 140px; height: 10px; margin-right: 8px; vertical-align: -1px;
+           background: rgba(128, 128, 128, .25); }
+.vcm-bar > span { display: block; height: 100%; background: rgba(128, 128, 128, .8); }
+/* The buttons keep their width, so a long name never pushes them into two lines. */
+table.vcm-manage td.vcm-actions { white-space: nowrap; overflow: visible; }
+table.vcm-manage td.vcm-actions input[type=button] { width: calc(50% - 6px); min-width: 0; margin: 0 0 0 4px;
+                                                     padding-left: 0; padding-right: 0; }
+@media (max-width: 760px) {
+  table.vcm-manage tr > td:nth-child(3) { display: none; }
+  table.vcm-manage tr > td:nth-child(1) { width: 40%; }
+  table.vcm-manage tr > td:nth-child(5) { width: 24%; }
+}

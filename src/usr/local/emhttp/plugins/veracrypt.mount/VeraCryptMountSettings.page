@@ -1,0 +1,49 @@
+Menu="VeraCryptMount:2"
+Title="Settings"
+Tag="cog"
+Markdown="false"
+---
+<?php
+/*
+ * The plugin's own settings, second tab of Settings > User Utilities >
+ * VeraCrypt Mount. The page holds no logic: it reads and saves through
+ * include/action.php, which starts the engine (docs/DESIGN-ui.md).
+ */
+$vcm = '/plugins/veracrypt.mount';
+?>
+<link type="text/css" rel="stylesheet" href="<?php autov("$vcm/css/vcmount.css") ?>">
+
+<!-- Unraid draws no title bar above a page shown as a tab (MainContentTabbed.php),
+     so each tab draws its own, written as Unraid's tab_title() writes it. -->
+<div class="title">
+  <span class="left inline-flex flex-row items-center gap-1"><i class="fa fa-cog title"></i>Settings</span>
+  <span class="right inline-flex flex-row items-center gap-1"></span>
+</div>
+
+<form id="vcs-form" autocomplete="off" onsubmit="return false">
+  <dl class="vcm-form">
+    <dt>Force a dismount when the array stops</dt>
+    <dd><select id="s-force"><option value="yes">Yes</option><option value="no">No</option></select>
+        <span class="vcm-note">Yes: a volume that is still in use when the array stops or the server shuts
+          down is dismounted anyway, after its dependents were stopped. No: the array waits until the
+          volume is free.</span></dd>
+    <dt>Require HTTPS to mount</dt>
+    <dd><select id="s-https"><option value="no">No</option><option value="yes">Yes</option></select>
+        <span class="vcm-note">Yes: a password is accepted only from a page opened over HTTPS. Over plain
+          HTTP it would travel unencrypted over your network. Unlocking over SSH always works.</span>
+        <p class="vcm-warning" id="s-https-warning" style="display:none">You are on plain HTTP right now.
+          With this on, you cannot mount from this page until you open it over HTTPS.</p></dd>
+    <dt>Show the volumes on the Main page</dt>
+    <dd><select id="s-main"><option value="no">No</option><option value="yes">Yes</option></select>
+        <span class="vcm-note">Yes: the Main page gets a section with the volumes and their Mount and
+          Dismount buttons.</span></dd>
+  </dl>
+
+  <p id="vcs-error" class="vcm-error" hidden></p>
+  <div class="vcm-buttons">
+    <input type="button" id="vcs-apply" class="lock" value="Apply" disabled>
+    <input type="button" id="vcs-done" class="lock" value="Done">
+  </div>
+</form>
+
+<script src="<?php autov("$vcm/js/vcsettings.js") ?>"></script>
