@@ -1,0 +1,56 @@
+#!/bin/bash
+# docker_started: start the dependents of every mounted volume after Docker has
+# started (LIFE-4).
+#
+# Unraid runs this file whenever it has started Docker: at array start, and
+# when Docker is switched off and on again in Settings › Docker (tested
+# 2026-11-17). Unraid then starts only containers with autostart on; dependents
+# have it off (DOC-7), so without this hook they would stay stopped although
+# their volume is mounted. At array start no volume is mounted yet, so the
+# engine finds nothing to do.
+#
+# It contains no logic of its own. It calls the engine:
+# vcmount start-dependents --all. It runs in the background, so Unraid's own
+# start (virtual machines, the rest of the array start) does not wait for the
+# dependents' delays. A dependent that cannot be started is written to the
+# system log with a notification by the engine.
+
+VCMOUNT="$(dirname "$0")/../scripts/vcmount"
+# dev-only-begin (scripts/build.py leaves this out of the package)
+# Development only: if a file volumes.dev.json lies next to the engine, the
+# engine reads it instead of the configuration on the flash drive. The package
+# never contains that file; scripts/deployhook.sh puts it there for tests.
+DEV_CONFIG="$(dirname "$0")/../scripts/volumes.dev.json"
+[ -f "$DEV_CONFIG" ] && export VCMOUNT_CONFIG="$DEV_CONFIG"
+# dev-only-end
+WAIT=5       # seconds between tries while another vcmount action is running
+BUDGET=300   # seconds in all; dependents with long delays fit easily
+
+say() { logger -t veracrypt.mount "Docker start: $*"; }
+
+start_all() {
+    SECONDS=0   # bash counts the seconds since this line by itself
+    code=0
+    while :; do
+        left=$((BUDGET - SECONDS))
+        [ "$left" -gt 0 ] || break
+        timeout "$left" "$VCMOUNT" start-dependents --all < /dev/null > /dev/null 2>&1
+        code=$?
+        # Code 6: another vcmount action is still running. Wait and try again.
+        [ "$code" -eq 6 ] || break
+        sleep "$WAIT"
+    done
+    case "$code" in
+        0) ;;
+        7) say "not every dependent could be started" ;;
+        6) say "another vcmount action was still running; dependents were not started" ;;
+        124) say "starting the dependents took longer than $BUDGET seconds and was cut short" ;;
+        *) say "vcmount ended with code $code" ;;
+    esac
+}
+
+# In the background, cut loose from Unraid's event runner.
+start_all < /dev/null > /dev/null 2>&1 &
+disown
+
+exit 0

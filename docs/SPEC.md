@@ -210,8 +210,13 @@ Nothing needs to be installed on the server.
   unmount); array stop, reboot and the power-cycle recovery were tested with them.
 - **LIFE-3 (Agreed)** Warn if the sum of grace periods exceeds Unraid's shutdown
   timeout, because Unraid forces the shutdown after that.
-- **LIFE-4 (Proposed)** If the Docker service is stopped or restarted, dependents follow
-  the same rules as above.
+- **LIFE-4 (Agreed 2026-11-17)** If the Docker service is stopped or restarted, dependents
+  follow the same rules as above. Unraid fires `stopping_docker` and `docker_started`
+  also when Docker is switched off and on in Settings › Docker (test in section 10).
+  The `stopping_docker` hook already stops the dependents with their grace periods;
+  the `docker_started` hook starts the dependents of every mounted volume in list
+  order (`vcmount start-dependents --all`), in the background so Unraid's start does
+  not wait. At array start no volume is mounted yet, so it does nothing there.
 - **LIFE-5 (Agreed, changed 2026-11-15)** A busy dismount is not forced by default. It
   aborts and the plugin shows what holds the volume open (processes, network clients).
   The user can then repeat it with an explicit **force** option. Force ends whatever
@@ -673,6 +678,17 @@ call `include/actions.php` the way the web page will, without a browser.
   Disk path: write 25–60 MB/s, read 19–204 MB/s. The disk path was no faster; its
   uneven numbers suggest other disk activity during that run. Writes are limited by
   parity, reads by the disk.
+- Docker switched off and on (LIFE-4, 2026-11-17, before the `docker_started` hook).
+  Throwaway containers `vcm-test-a/b` (`alpine:3.21`, no network) as dependents of
+  `throwaway-exfat`, mounted and running; Docker set to "No" and back to "Yes" in
+  Settings › Docker. The `stopping_docker` hook ran: `vcm-test-b` stopped at 17:10:06.0,
+  `vcm-test-a` at 17:10:06.9, Unraid's `rc.docker stop` began at 17:10:07. After the
+  start the dependents stayed stopped, although the volume was mounted: the gap the
+  `docker_started` hook closes.
+- The same with the `docker_started` hook (version 2026.11.17m). Docker started at
+  17:29:37; the hook started `vcm-test-a` at 17:29:45 and `vcm-test-b` at 17:29:47 (the
+  set delay of 2 seconds), while Unraid was still starting its own containers (done at
+  17:30:09), so Unraid's start did not wait for it. Passed.
 
 **Engine tests (2026-11-15, all passed, on `throwaway-ntfs`, run with
 `scripts/enginetest.sh`).**

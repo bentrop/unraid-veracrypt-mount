@@ -2,8 +2,9 @@
 # stopping_docker: stop the dependents of every mounted volume before Unraid
 # stops Docker (LIFE-1).
 #
-# Unraid runs this file when the array stops, just before it stops all
-# containers itself. Unraid gives every container the same short time (10
+# Unraid runs this file whenever it is about to stop Docker: when the array
+# stops, and when Docker is switched off in Settings › Docker (LIFE-4, tested
+# 2026-11-17). It runs just before Unraid stops all containers itself. Unraid gives every container the same short time (10
 # seconds unless set otherwise) and then kills it. Stopping the dependents
 # here first gives each of them its own grace period (DOC-4). One that has not
 # stopped by then is killed (DOC-5).
@@ -29,7 +30,7 @@ DEV_CONFIG="$(dirname "$0")/../scripts/volumes.dev.json"
 VAR_INI=/var/local/emhttp/var.ini
 WAIT=5   # seconds between tries while another vcmount action is running
 
-say() { logger -t veracrypt.mount "array stop: $*"; }
+say() { logger -t veracrypt.mount "Docker stop: $*"; }
 
 # Unraid's shutdown time-out in seconds; 90 if it cannot be read.
 shutdown_timeout=$(sed -n 's/^shutdownTimeout="\{0,1\}\([0-9]\{1,5\}\)"\{0,1\}[[:space:]]*$/\1/p' "$VAR_INI" 2> /dev/null | head -n 1)

@@ -45,6 +45,7 @@ and is hard to change later).
 | `vcmount dismount <name>` | Stops the dependents, then dismounts and locks one volume. Not forced unless `--force` is given. |
 | `vcmount dismount --all` | The same for every mounted volume. Used by the `unmounting_disks` hook. |
 | `vcmount stop-dependents --all` | Stops the dependents of every mounted volume; the volumes stay mounted. Used by the `stopping_docker` hook. |
+| `vcmount start-dependents --all` | Starts the dependents of every mounted volume in list order. Used by the `docker_started` hook after Docker was switched off and on (LIFE-4). |
 | `vcmount repair-shares` | Makes the SMB shares match the mounted volumes: adds missing ones, removes left-over ones (section 9b). |
 | `vcmount options` | Lists the Unraid users and the Docker containers, for the web forms. Changes nothing. |
 | `vcmount config` | Shows the saved settings as stored, with their revision (a SHA-256 fingerprint of the file, or `none`). Changes nothing. |

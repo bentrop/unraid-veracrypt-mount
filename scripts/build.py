@@ -48,6 +48,7 @@ EXECUTABLE = {
     'usr/local/sbin/vcmount',
     f'usr/local/emhttp/plugins/{NAME}/scripts/vcmount',
     f'usr/local/emhttp/plugins/{NAME}/event/stopping_docker',
+    f'usr/local/emhttp/plugins/{NAME}/event/docker_started',
     f'usr/local/emhttp/plugins/{NAME}/event/unmounting_disks',
 }
 # Files that are not text, so the line-ending check does not apply.

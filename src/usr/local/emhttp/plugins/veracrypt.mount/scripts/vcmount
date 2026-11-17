@@ -91,6 +91,7 @@ Usage:
   vcmount dismount --all --array-stop        as the array-stop hook calls it: forced
                                              unless the setting turns that off
   vcmount stop-dependents --all              stop the dependents of every mounted volume
+  vcmount start-dependents --all             start the dependents of every mounted volume
   vcmount repair-shares                      make the SMB shares match the mounted volumes
   vcmount options                            list the users and containers the forms offer
   vcmount busy                               say whether another vcmount action is running
@@ -1692,6 +1693,44 @@ function command_stop_dependents(array $args, array $options, bool $json): int
 }
 
 /**
+ * Start the dependents of every saved volume that is mounted, in list order
+ * with their delays (DOC-3). Used by the docker_started hook (LIFE-4): after
+ * Docker was switched off and on, Unraid starts only its autostart containers,
+ * and dependents have autostart off (DOC-7). At array start no volume is
+ * mounted yet, so this does nothing there.
+ */
+function command_start_dependents(array $args, array $options, bool $json): int
+{
+    if (!$options['all'] || $args !== []) {
+        throw new Fail('Usage: vcmount start-dependents --all', CODE_USAGE);
+    }
+    $config = load_config();
+    $lock = take_lock();
+    $live = live_volumes();
+    $failed = [];
+    $started = 0;
+    foreach ($config as $name => $volume) {
+        $name = (string) $name;
+        if (($live[$name]['mounted_at'] ?? null) === null || $volume['dependents'] === []) {
+            continue;
+        }
+        $failed = array_merge($failed, start_dependents($name, $volume['dependents']));
+        $started += count($volume['dependents']);
+    }
+    $code = $failed === [] ? CODE_OK : CODE_DEPENDENT;
+
+    if ($json) {
+        echo json_encode(['ok' => $failed === [], 'code' => $code, 'failed_dependents' => $failed], JSON_UNESCAPED_SLASHES), "\n";
+        return $code;
+    }
+    echo $started === 0 ? "No mounted volume has dependents.\n" : "Dependents of the mounted volumes are running.\n";
+    foreach ($failed as $f) {
+        fwrite(STDERR, "Dependent \"{$f['container']}\" could not be started: {$f['reason']}\n");
+    }
+    return $code;
+}
+
+/**
  * Make the SMB shares match the mounted volumes (section 9b): add the share of
  * every mounted saved volume that should have one, and remove every share of
  * ours that no mounted volume needs. Also puts back include lines that another
@@ -2415,6 +2454,8 @@ function main(array $argv): int
                 return command_dismount($args, $options, $json);
             case 'stop-dependents':
                 return command_stop_dependents($args, $options, $json);
+            case 'start-dependents':
+                return command_start_dependents($args, $options, $json);
             case 'repair-shares':
                 return command_repair_shares($args, $json);
             case 'options':
