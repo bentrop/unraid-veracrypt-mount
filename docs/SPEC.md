@@ -94,8 +94,12 @@ Nothing needs to be installed on the server.
 - **VOL-7 (Agreed)** Before mounting, refuse if a network client currently has the
   container file open (protects against mounting on Bob and on Windows at once, which
   corrupts the volume).
-- **VOL-8 (Verify)** Open the backing file through its real disk or pool path instead of
-  the `/mnt/user` path if that proves faster and safe.
+- **VOL-8 (Verify, measured 2026-11-17)** Open the backing file through its real disk or
+  pool path instead of the `/mnt/user` path if that proves faster and safe. On an array
+  disk it is not faster (test result in section 10): the disk and parity are the limit,
+  not Unraid's share layer. Keep the `/mnt/user` path; look again only for a volume on
+  a fast pool (NVMe), where the share layer may matter. A pool path also changes when
+  the mover moves the file, so it would need care.
 
 ### 5.2 Credentials and key sources
 
@@ -662,6 +666,13 @@ call `include/actions.php` the way the web page will, without a browser.
   Windows write to the share; on `throwaway-btrfs` "Let the share write" in the
   information window changed the folder to `nobody:users, 0777` and Windows could
   write; "Fix permissions…" asked first and ran. Passed.
+- Speed through the share path and the disk path (VOL-8, 2026-11-17). `throwaway-400-xfs`
+  on array disk 5, mounted "once" through `/mnt/user/…` and through `/mnt/disk5/…`;
+  `scripts/speedtest.sh`, three rounds of writing 250 MB (with fsync) and reading it
+  back after emptying the read cache. Share path: write 46–66 MB/s, read 216–231 MB/s.
+  Disk path: write 25–60 MB/s, read 19–204 MB/s. The disk path was no faster; its
+  uneven numbers suggest other disk activity during that run. Writes are limited by
+  parity, reads by the disk.
 
 **Engine tests (2026-11-15, all passed, on `throwaway-ntfs`, run with
 `scripts/enginetest.sh`).**
