@@ -125,7 +125,9 @@ def main():
     day = datetime.datetime.strptime(version[:10], '%Y.%m.%d').replace(tzinfo=datetime.timezone.utc)
     MTIME = int(day.timestamp())
 
-    files = sorted(p for p in SRC.rglob('*') if p.is_file())
+    # Sorted by the plain path text: Windows would otherwise ignore upper and lower
+    # case, Linux not, and the same sources would give two different packages.
+    files = sorted((p for p in SRC.rglob('*') if p.is_file()), key=lambda p: p.relative_to(SRC).as_posix())
     if not files:
         fail('src/ holds no files.')
     for path in files:
