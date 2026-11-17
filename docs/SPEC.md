@@ -594,6 +594,16 @@ call `include/actions.php` the way the web page will, without a browser.
   While the GitHub repository is private, the page's update check cannot fetch the
   `.plg`, shows "not available" and sorts the plugin last; this goes away once the
   repository is public.
+- Public release and install from GitHub (2026-11-17). The repository was published
+  with a fresh history (the old one stays private as `unraid-veracrypt-mount-dev`).
+  The first release run (tag `2026.11.17e`) refused to publish: its package had a
+  different checksum than the `.plg`, because Windows sorted the package's files
+  without regard to case and Linux with it. Fixed by sorting on the plain path text;
+  a local build then gave GitHub's checksum exactly. Release `2026.11.17f` was built,
+  checked and published by the workflow. On Bob the plugin was removed and installed
+  from `https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/veracrypt.mount.plg`:
+  the `.plg` and the package were downloaded from GitHub and checked, the volume list
+  was kept, and the Plugins page shows "up-to-date" in alphabetical order. Passed.
 
 **Engine tests (2026-11-15, all passed, on `throwaway-ntfs`, run with
 `scripts/enginetest.sh`).**
