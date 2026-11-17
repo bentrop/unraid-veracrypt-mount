@@ -329,7 +329,7 @@ The design is in `docs/DESIGN-engine.md`.
   committed `.plg` describes exactly this package (`build.py --check`; builds are
   reproducible because every file carries midnight UTC of the version's date), and
   publishes package and `.plg` as a GitHub release. It never writes to the repository;
-  it uses `actions/checkout` pinned to a commit and the `gh` command of GitHub's
+  it uses `actions/checkout` (v7.0.1 since 2026-11-17) pinned to a commit and the `gh` command of GitHub's
   runners. While the repository is private (decided 2026-11-16), Unraid cannot download
   from it, so installs stay local.
 - Licence: MIT.
