@@ -235,3 +235,48 @@ Stated so they are known, not as findings. They match DESIGN-ui section 4.
 - This review covers the password only. PIM, keyfiles and hidden volumes are not
   built yet (`vcmount` line 1213 refuses hidden volumes); when they are, their path
   needs the same review.
+
+## 7. Follow-up (2026-11-17)
+
+Fixed in version 2026.11.17 to 2026.11.17b (see the commit history and SPEC, decision
+log 2026-11-17):
+
+- **P1** fixed: with "require HTTPS" on, a page opened over plain HTTP offers no
+  password field, only a link to HTTPS; the page and the submit function refuse to
+  send, and the server check stays. "Require HTTPS" is now on by default. Browser test
+  passed.
+- **H1** fixed: the form has `method="post"`, `action="about:blank"` and an inline
+  `onsubmit="return false"`, and is wired up first.
+- **H2** fixed: `#[\SensitiveParameter]` on both PHP parameters that carry the
+  password; `action.php` answers unexpected errors with a fixed text.
+- **H3** fixed: the development switch sits between `dev-only` markers and is left
+  out of the package by `scripts/build.py`, which refuses to build if it remains.
+- **H4, H5** documented under PRIV-4. **H6** fixed in the help text. **H7**: 128
+  character limit; the reverse proxy note is in DESIGN-ui section 4.
+
+Open checks of section 5, done on Bob the same day (read-only, test volumes only):
+
+1. **CSRF and login: passed.** Unraid's `local_prepend.php` checks the token on every
+   POST before any plugin code runs (403 when missing or wrong, `hash_equals`). A POST
+   without login is redirected to `/login`.
+2. **PHP errors: H2 was a real risk.** `error_log = syslog` and
+   `zend.exception_ignore_args = 0`, so a stack trace with arguments would have reached
+   the system log, which Unraid also copies to the flash at shutdown. Closed by the H2
+   fix.
+3. **HTTP to HTTPS: not redirected on Bob.** The P1 case can occur there; closed by the
+   P1 fix and the new default.
+4. **cryptsetup and a wrong password: passed.** After a mount with a wrong and one with
+   the right password, `scripts/logcheck.sh` found the password nowhere under
+   `/var/log` or `/tmp`.
+5. **Browser save prompt after "mount once": passed in the owner's browser.** No offer
+   to save the password. Not because of plain HTTP (browsers generally still offer to
+   save there, they only refuse to fill in), but most likely because the field is
+   marked "do not save", is emptied the moment Mount is clicked, and the page sends in
+   the background without loading a new page, the moment browsers usually ask. Side
+   effect for normal volumes (UI-4): a password manager can still fill the dialog, but
+   may not offer to save a new entry by itself; add it once by hand.
+6. **Kernel messages after "mount once": passed.** The system log names neither the
+   volume name nor the file path. The kernel logs only the size of the loop device
+   (`loop3: detected capacity change from 0 to 102400`).
+7. **Form nesting on Dashboard and Main: passed.** No form on those pages encloses the
+   dialog; every form there closes within its own section.

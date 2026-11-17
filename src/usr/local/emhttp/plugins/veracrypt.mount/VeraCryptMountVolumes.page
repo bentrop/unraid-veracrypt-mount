@@ -55,11 +55,18 @@ $vcm = '/plugins/veracrypt.mount';
     </tbody>
   </table>
 
-  <div class="vcm-buttons">
-    <input type="button" id="vcm-add" value="Add volume">
-    <input type="button" id="vcm-mount-all" value="Mount all">
-    <input type="button" id="vcm-dismount-all" value="Dismount all">
-    <input type="button" id="vcm-once" value="Mount a file once">
+  <!-- Left: bring in something new. Right, under the rows' buttons: the same
+       actions for every volume in the list. On a narrow screen the right group
+       wraps under the left one. -->
+  <div class="vcm-buttons vcm-split">
+    <span>
+      <input type="button" id="vcm-add" value="Add volume">
+      <input type="button" id="vcm-once" value="Mount a file once">
+    </span>
+    <span>
+      <input type="button" id="vcm-mount-all" value="Mount all">
+      <input type="button" id="vcm-dismount-all" value="Dismount all">
+    </span>
   </div>
 </div>
 

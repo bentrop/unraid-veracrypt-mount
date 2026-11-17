@@ -783,6 +783,16 @@
         $('#e-name').val(autoName);
     }
 
+    var autoOnceName = '';       // the name last filled in for "Mount a file once"
+
+    /** The same for "Mount a file once": fill an empty name from the chosen file. */
+    function suggestOnceName() {
+        var name = $.trim($('#vcm-name').val());
+        if (name !== '' && name !== autoOnceName) { return; }
+        autoOnceName = nameFromFile($.trim($('#vcm-file').val()));
+        $('#vcm-name').val(autoOnceName);
+    }
+
     /** Load the saved settings and the choices, then show the panel for one volume. */
     function openEdit(name) {
         $.when(act({ action: 'config' }), options ? options : act({ action: 'options' })).then(function (c, o) {
@@ -1018,7 +1028,10 @@
         if ($.fn.fileTreeAttach) {
             $('#e-file').fileTreeAttach();
             $('#e-mount-at').fileTreeAttach();
+            $('#vcm-file').fileTreeAttach();   // "Mount a file once" (Volumes tab only)
         }
+        // "Mount a file once": fill an empty name from the chosen file, as "Add volume" does.
+        $('#vcm-file').on('input change', suggestOnceName);
         $('#e-add').on('click', function () { apply(true); });
         $('#e-apply').on('click', function () { apply(false); });
         // Reset brings back the saved settings and stays, as Unraid's reload does.

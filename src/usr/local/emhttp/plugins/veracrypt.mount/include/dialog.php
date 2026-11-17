@@ -17,7 +17,11 @@
     <input type="text" id="vcm-user" name="username" autocomplete="username" class="vcm-offscreen" tabindex="-1" readonly>
     <div id="vcm-once-fields" hidden>
       <!-- VOL-5 leaves no trace, so the browser must not remember these either. -->
-      <label>Volume file <input type="text" id="vcm-file" placeholder="/mnt/user/..." spellcheck="false" autocomplete="off"></label>
+      <!-- Not inside the label: Unraid's file picker puts its folder tree right
+           after the field, and clicks in a label's tree would reach the field. -->
+      <div class="vcm-field"><label for="vcm-file">Volume file</label>
+        <input type="text" id="vcm-file" placeholder="/mnt/user/..." spellcheck="false" autocomplete="off"
+               data-pickroot="/mnt/" data-pickcloseonfile="true"></div>
       <label>Name <input type="text" id="vcm-name" maxlength="32" placeholder="letters, digits, - and _" spellcheck="false" autocomplete="off"></label>
       <label class="vcm-check"><input type="checkbox" id="vcm-read-only"> Read-only</label>
       <p class="vcm-note">Nothing about this volume is saved or logged.</p>

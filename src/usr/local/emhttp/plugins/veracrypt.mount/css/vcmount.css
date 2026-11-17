@@ -28,6 +28,10 @@
            padding: 16px 20px; width: 100%; max-width: 440px; box-shadow: 0 4px 24px rgba(0, 0, 0, .4); }
 .vcm-box h3 { margin-top: 0; }
 .vcm-box label { display: block; margin: 10px 0; }
+/* A field outside its label (the file field, because of Unraid's file picker). */
+.vcm-box .vcm-field { margin: 10px 0; }
+.vcm-box .vcm-field label { margin: 0; }
+.vcm-box .vcm-field input[type=text] { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; }
 .vcm-box input[type=text], .vcm-box input[type=password] { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; }
 .vcm-box label.vcm-check { display: flex; align-items: center; gap: 6px; }
 
@@ -147,3 +151,13 @@ table.vcm-manage td.vcm-actions input[type=button] { width: calc(50% - 6px); min
   table.vcm-manage tr > td:nth-child(1) { width: 40%; }
   table.vcm-manage tr > td:nth-child(5) { width: 24%; }
 }
+
+/* The buttons under the volume list: two groups, left and right. */
+.vcm-split { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.vcm-split > span { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0; }   /* centred, not stretched to the taller group */
+/* The right group lines up with the last table column (14%, 24% on narrow
+   screens) and its two buttons have the width of the rows' buttons. */
+.vcm-split > span:last-child { flex: 0 0 14%; justify-content: flex-end; padding-right: 8px; box-sizing: border-box; }
+.vcm-split > span:last-child input[type=button] { width: calc(50% - 6px); min-width: 0; margin: 0 0 0 4px;
+                                                 padding-left: 0; padding-right: 0; }
+@media (max-width: 760px) { .vcm-split > span:last-child { flex-basis: 24%; } }
