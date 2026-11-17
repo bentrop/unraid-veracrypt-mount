@@ -84,8 +84,12 @@ Usage:
   vcmount list                               list saved volumes and anything mounted
   vcmount status <name>                      show one volume
   vcmount mount <name> [--read-only]         unlock and mount a saved volume
-  vcmount mount --file <path> --name <name> [--read-only]
-                                             mount without saving
+  vcmount mount --file <path> --name <name> [--read-only] [--keyfile <path>]...
+                [--pim] [--hidden]           mount without saving
+      The password is read from the terminal or standard input. With a PIM
+      (saved with the volume, or --pim), the PIM is asked for after it; on
+      standard input it is the line after the password. Keyfiles are given by
+      path; --keyfile may be repeated. --hidden opens the hidden volume.
   vcmount dismount <name> [--force]          stop the dependents, dismount and lock
   vcmount dismount --all [--force]           the same for every mounted volume
   vcmount dismount --all --array-stop        as the array-stop hook calls it: forced
@@ -212,11 +216,57 @@ function check_config($data, string $source): array
             'mount_at' => is_string($mount_at) && $mount_at !== '' ? $mount_at : "/mnt/addons/$name",
             'read_only' => !empty($entry['read_only']),
             'hidden' => !empty($entry['hidden']),
+            'pim' => !empty($entry['pim']),
+            'keyfiles' => read_keyfiles($name, $entry['keyfiles'] ?? []),
             'dependents' => read_dependents($name, $entry['dependents'] ?? []),
             'share' => read_share($name, $entry['share'] ?? null),
         ];
     }
     return ['volumes' => $volumes, 'settings' => $settings];
+}
+
+/** At most this many keyfiles per volume. */
+const MAX_KEYFILES = 8;
+
+/**
+ * Check a list of keyfile paths (KEY-2, KEY-3). Only the paths are stored,
+ * never what the files contain. $volume names the volume in error messages.
+ */
+function read_keyfiles(string $volume, $list): array
+{
+    $fault = new Fail("The volume \"$volume\" has a keyfile path that is not valid.", CODE_USAGE);
+    if (!is_array($list) || count($list) > MAX_KEYFILES) {
+        throw $fault;
+    }
+    $paths = [];
+    foreach ($list as $path) {
+        if (!is_string($path) || $path === '' || $path[0] !== '/' || strlen($path) > 4096
+            || preg_match('/[\x00-\x1f]/', $path)) {
+            throw $fault;
+        }
+        $paths[] = $path;
+    }
+    return array_values(array_unique($paths));
+}
+
+/**
+ * Check that every keyfile exists and is an ordinary, readable file that is not
+ * the volume file itself. Returns the resolved paths for cryptsetup.
+ */
+function check_keyfiles(array $keyfiles, string $volume_file): array
+{
+    $resolved = [];
+    foreach ($keyfiles as $path) {
+        $real = realpath($path);
+        if ($real === false || !is_file($real) || !is_readable($real)) {
+            throw new Fail("The keyfile $path does not exist or cannot be read. If it is on a removable drive, connect it first.", CODE_USAGE);
+        }
+        if ($real === $volume_file) {
+            throw new Fail('The volume file cannot be its own keyfile.', CODE_USAGE);
+        }
+        $resolved[] = $real;
+    }
+    return $resolved;
 }
 
 /**
@@ -413,6 +463,10 @@ function describe(string $name, ?array $saved, ?array $live): array
         'size_bytes' => $size === false ? null : (int) $size,
         'free_bytes' => $free === false ? null : (int) $free,
         'share' => $saved['share'] ?? null,
+        // What the mount dialog has to ask for. Keyfile paths are not secret.
+        'pim' => $saved['pim'] ?? false,
+        'keyfiles' => $saved['keyfiles'] ?? [],
+        'hidden' => $saved['hidden'] ?? false,
         'dependents' => array_column($saved['dependents'] ?? [], 'container'),
         'share_active' => share_active($name),
     ];
@@ -1105,12 +1159,14 @@ function lock_again(string $mapper): bool
  * Unlock and mount one volume (docs/DESIGN-engine.md, section 7).
  * Whatever goes wrong, the steps already taken are undone.
  */
-function do_mount(string $name, string $file, string $point, bool $read_only): void
+function do_mount(string $name, string $file, string $point, bool $read_only,
+                  array $keyfiles = [], bool $pim = false, bool $hidden = false): void
 {
     $real = realpath($file);
     if ($real === false || !is_file($real)) {
         throw new Fail("The volume file $file does not exist or is not an ordinary file.", CODE_USAGE);
     }
+    $keyfiles = check_keyfiles($keyfiles, $real);
     $mapper = MAPPER_PREFIX . $name;
     $device = MAPPER_DIR . '/' . $mapper;
 
@@ -1130,8 +1186,20 @@ function do_mount(string $name, string $file, string $point, bool $read_only): v
     }
 
     // Unlock. cryptsetup reads the password itself, straight from our
-    // standard input. This program never sees it.
+    // standard input, and with a PIM the PIM after it (the next line, or a
+    // second prompt on a terminal). This program never sees either. Keyfiles
+    // are passed by path; their content is read by cryptsetup alone (SEC-1).
     $command = [program('cryptsetup'), 'tcryptOpen', '--veracrypt'];
+    if ($pim) {
+        $command[] = '--veracrypt-query-pim';
+    }
+    foreach ($keyfiles as $keyfile) {
+        $command[] = '--key-file';
+        $command[] = $keyfile;
+    }
+    if ($hidden) {
+        $command[] = '--tcrypt-hidden';
+    }
     if ($read_only) {
         $command[] = '--readonly';
     }
@@ -1144,7 +1212,19 @@ function do_mount(string $name, string $file, string $point, bool $read_only): v
             throw new Fail('Unlocking took too long and was stopped.', CODE_UNLOCK_FAILED);
         }
         if ($r['code'] === 2) {
-            throw new Fail('Could not unlock: wrong password, or not a VeraCrypt volume.', CODE_UNLOCK_FAILED);
+            // cryptsetup cannot tell which part was wrong.
+            $parts = ['password'];
+            if ($pim) {
+                $parts[] = 'PIM';
+            }
+            if ($keyfiles !== []) {
+                $parts[] = count($keyfiles) > 1 ? 'keyfiles' : 'keyfile';
+            }
+            $what = count($parts) > 1
+                ? implode(', ', array_slice($parts, 0, -1)) . ' or ' . end($parts)
+                : 'password';
+            throw new Fail("Could not unlock: wrong $what,"
+                . ($hidden ? ' no hidden volume inside,' : '') . ' or not a VeraCrypt volume.', CODE_UNLOCK_FAILED);
         }
         throw new Fail("cryptsetup could not open the volume (its result code was {$r['code']}).", CODE_USAGE);
     }
@@ -1224,7 +1304,7 @@ function command_mount(array $args, array $options, bool $json): int
     if ($options['file'] !== null || $options['name'] !== null) {
         // Mount without saving: nothing about it is stored or logged.
         if ($args !== [] || $options['file'] === null || $options['name'] === null) {
-            throw new Fail('Usage: vcmount mount --file <path> --name <name> [--read-only]', CODE_USAGE);
+            throw new Fail('Usage: vcmount mount --file <path> --name <name> [--read-only] [--keyfile <path>]... [--pim] [--hidden]', CODE_USAGE);
         }
         $name = $options['name'];
         if (!preg_match(NAME_PATTERN, $name)) {
@@ -1239,10 +1319,12 @@ function command_mount(array $args, array $options, bool $json): int
         $saved = false;
         $volume = [
             'file' => $options['file'], 'mount_at' => "/mnt/addons/$name", 'read_only' => false,
-            'hidden' => false, 'dependents' => [], 'share' => null,
+            'hidden' => $options['hidden'], 'pim' => $options['pim'],
+            'keyfiles' => read_keyfiles($name, $options['keyfile']), 'dependents' => [], 'share' => null,
         ];
     } else {
-        if (count($args) !== 1) {
+        // A saved volume uses its saved keyfiles, PIM and hidden settings.
+        if (count($args) !== 1 || $options['keyfile'] !== [] || $options['pim'] || $options['hidden']) {
             throw new Fail('Usage: vcmount mount <name> [--read-only]', CODE_USAGE);
         }
         $name = $args[0];
@@ -1255,9 +1337,6 @@ function command_mount(array $args, array $options, bool $json): int
         $saved = true;
         $volume = $config[$name];
     }
-    if ($volume['hidden']) {
-        throw new Fail('Hidden volumes are not built yet.', CODE_USAGE);
-    }
     $read_only = $volume['read_only'] || $options['read_only'];
 
     // The web page adds --over-http when the password came over plain HTTP.
@@ -1267,7 +1346,8 @@ function command_mount(array $args, array $options, bool $json): int
 
     $lock = take_lock();
     try {
-        do_mount($name, $volume['file'], $volume['mount_at'], $read_only);
+        do_mount($name, $volume['file'], $volume['mount_at'], $read_only,
+                 $volume['keyfiles'], $volume['pim'], $volume['hidden']);
     } catch (Fail $e) {
         if ($saved) {
             $reasons = [
@@ -2322,6 +2402,12 @@ function volume_for_file(array $v): array
     if ($v['hidden']) {
         $out['hidden'] = true;
     }
+    if ($v['pim']) {
+        $out['pim'] = true;   // only that it asks for one, never the PIM itself
+    }
+    if ($v['keyfiles'] !== []) {
+        $out['keyfiles'] = $v['keyfiles'];
+    }
     if ($v['share'] !== null) {
         $out['share'] = $v['share'];
     }
@@ -2409,17 +2495,25 @@ function parse_args(array $args): array
     $flags = [
         '--json' => 'json', '--read-only' => 'read_only', '--all' => 'all',
         '--force' => 'force', '--array-stop' => 'array_stop', '--over-http' => 'over_http',
+        '--pim' => 'pim', '--hidden' => 'hidden',
     ];
     $values = ['--file' => 'file', '--name' => 'name', '--revision' => 'revision'];
     $options = [
         'json' => false, 'read_only' => false, 'all' => false, 'force' => false, 'array_stop' => false,
-        'over_http' => false, 'file' => null, 'name' => null, 'revision' => null,
+        'over_http' => false, 'pim' => false, 'hidden' => false, 'file' => null, 'name' => null,
+        'revision' => null, 'keyfile' => [],
     ];
     $plain = [];
     while ($args !== []) {
         $arg = array_shift($args);
         if (isset($flags[$arg])) {
             $options[$flags[$arg]] = true;
+        } elseif ($arg === '--keyfile') {
+            // May be given more than once.
+            if ($args === []) {
+                throw new Fail('--keyfile needs a value.', CODE_USAGE);
+            }
+            $options['keyfile'][] = array_shift($args);
         } elseif (isset($values[$arg])) {
             if ($args === []) {
                 throw new Fail("$arg needs a value.", CODE_USAGE);

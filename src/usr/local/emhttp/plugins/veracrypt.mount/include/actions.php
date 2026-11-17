@@ -63,7 +63,10 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
         case 'mount':
         case 'mount-once':
             $password = $post['password'] ?? null;
-            if (!is_string($password) || $password === '') {
+            // VeraCrypt allows a volume with keyfiles and no password. The page
+            // says so with no_password=1, only when keyfiles are used.
+            $no_password = ($post['no_password'] ?? '') === '1';
+            if (!is_string($password) || ($password === '' && !$no_password)) {
                 return vcm_refuse('Enter the password.');
             }
             // A line break would end the password early in cryptsetup.
@@ -72,6 +75,12 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
             }
             if (mb_strlen($password, 'UTF-8') > VCM_MAX_PASSWORD) {
                 return vcm_refuse('The password is longer than VeraCrypt allows (' . VCM_MAX_PASSWORD . ' characters).');
+            }
+            // The PIM, if the volume has one: digits only, sent after the
+            // password on the engine's standard input (SEC-1), never as an argument.
+            $pim = $post['pim'] ?? '';
+            if (!is_string($pim) || ($pim !== '' && !preg_match('/\A[1-9][0-9]{0,8}\z/', $pim))) {
+                return vcm_refuse('The PIM must be a whole number from 1 upwards, without spaces.');
             }
             if ($action === 'mount') {
                 $args = ['mount', $name];
@@ -86,13 +95,37 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
                 if (($post['read_only'] ?? '') === '1') {
                     $args[] = '--read-only';
                 }
+                if (($post['hidden'] ?? '') === '1') {
+                    $args[] = '--hidden';
+                }
+                if ($pim !== '') {
+                    $args[] = '--pim';
+                }
+                $keyfiles = $post['keyfiles'] ?? [];
+                if (!is_array($keyfiles) || count($keyfiles) > 8) {
+                    return vcm_refuse('Too many keyfiles.');
+                }
+                foreach ($keyfiles as $keyfile) {
+                    if (!is_string($keyfile) || $keyfile === '' || $keyfile[0] !== '/' || strlen($keyfile) > 4096
+                        || preg_match('/[\x00-\x1f]/', $keyfile)) {
+                        return vcm_refuse('That is not a valid path to a keyfile.');
+                    }
+                    $args[] = '--keyfile';
+                    $args[] = $keyfile;
+                }
+                if ($password === '' && $keyfiles === []) {
+                    return vcm_refuse('Enter the password.');
+                }
             }
             // The engine refuses this when the setting "require HTTPS" is on (UI-5).
             if (!$https) {
                 $args[] = '--over-http';
             }
-            $stdin = $password;
-            unset($password);
+            // With a PIM, cryptsetup reads the password as the first line and
+            // the PIM as the second. A saved volume that asks for a PIM gets
+            // one only when the page sent it; the engine then says it is wrong.
+            $stdin = $pim === '' ? $password : $password . "\n" . $pim . "\n";
+            unset($password, $pim);
             break;
         case 'dismount':
             $args = ['dismount', $name];

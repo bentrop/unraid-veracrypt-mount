@@ -42,13 +42,16 @@ Windows, just not on both at once.
 ## Requirements and limits
 
 - Unraid **7.4** or newer.
-- VeraCrypt volumes opened with a **password**, with **FAT32, exFAT, NTFS, ext2/3/4,
+- VeraCrypt volumes opened with a **password**, optionally with a **PIM** and
+  **keyfiles**, including **hidden volumes**, with **FAT32, exFAT, NTFS, ext2/3/4,
   XFS or Btrfs** inside. FAT32, exFAT and NTFS also open in VeraCrypt on Windows; ext4,
   XFS and Btrfs keep Unix owners and permissions, which containers need, but open only
   on Linux. (VeraCrypt on Windows creates only the first three; for the others, create
   the volume with VeraCrypt on Linux.)
-- Not built yet: keyfiles, PIM, hidden volumes, mounting automatically at array start,
-  and Docker Compose stacks as dependents.
+- Not built yet: mounting automatically at array start, locking after a time without
+  activity, and Docker Compose stacks as dependents.
+- A hidden volume has no write protection on Linux: mounting its outer volume
+  read-write can overwrite it. Mount the outer volume read-only.
 - FAT32, exFAT and NTFS have no Unix file permissions, so some containers (databases
   especially) will not run from them; use ext4, XFS or Btrfs for those. exFAT has no journal and is the more fragile
   choice after a power cut.
@@ -81,7 +84,8 @@ reinstall picks it up again.
 
 - **The password** travels from the browser to `cryptsetup` in the body of one request
   and then on standard input only. It is never stored, never put into a command line,
-  a file, a log or a notification. The plugin keeps no password on the server.
+  a file, a log or a notification. The plugin keeps no password on the server. A PIM
+  takes the same way, right after the password; keyfiles are stored only as paths.
 - **HTTPS:** the setting **Require HTTPS to mount** is **on by default**. While it is
   on, a page opened over plain HTTP offers no password field at all, because over
   plain HTTP the password would cross your network unencrypted. If you use Unraid

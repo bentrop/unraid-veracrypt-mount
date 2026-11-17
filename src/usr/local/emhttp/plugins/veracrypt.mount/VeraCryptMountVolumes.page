@@ -72,8 +72,8 @@ $vcm = '/plugins/veracrypt.mount';
 
 <!-- Add / edit a volume (screen s-edit). Only name and file are always
      visible; the boxes below are folded and show their setting on the right.
-     Features that are not built yet (keyfiles, automount, hidden volumes,
-     lock when idle, Compose stacks) are left out until they exist. -->
+     Features that are not built yet (automount, lock when idle, Compose
+     stacks) are left out until they exist. -->
 <div id="vcm-edit" hidden>
   <!-- Used only when Unraid shows no title bar above the page (tabs). -->
   <nav class="vcm-crumb" id="vcm-crumb" hidden></nav>
@@ -91,6 +91,28 @@ $vcm = '/plugins/veracrypt.mount';
       <dd><label class="vcm-check"><input type="checkbox" id="e-ro"> The files on the volume stay untouched. Nothing can change, add or delete them, here or over the network.</label></dd>
     </dl>
     <p class="vcm-note">A new volume needs only a name and a file. Everything else starts with a safe default.</p>
+
+    <details class="vcm-fold">
+      <summary>Unlocking <span class="vcm-sum" id="s-unlock"></span></summary>
+      <dl class="vcm-form">
+        <dt>Keyfiles</dt>
+        <dd><ul id="e-keyfiles" class="vcm-keyfiles"></ul>
+            <input type="text" id="e-keyfile" spellcheck="false" autocomplete="off" placeholder="/mnt/..."
+                   data-pickroot="/mnt/" data-pickcloseonfile="true">
+            <input type="button" id="e-keyfile-add" value="Add keyfile">
+            <span class="vcm-note">Only the path is saved, never the file's content. A keyfile on a
+              removable drive must be connected when you mount.</span></dd>
+        <dt>PIM</dt>
+        <dd><label class="vcm-check"><input type="checkbox" id="e-pim"> Ask for a PIM when mounting.
+            The PIM itself is never saved.</label></dd>
+        <dt>Hidden volume</dt>
+        <dd><label class="vcm-check"><input type="checkbox" id="e-hidden"> Open the hidden volume inside
+            this file, with the hidden volume's password.</label></dd>
+      </dl>
+      <p class="vcm-warning" id="e-hidden-warn">If this file holds a hidden volume, mounting the outer
+         volume read-write can overwrite and destroy the hidden one: Linux has no protection for it.
+         Mount the outer volume read-only.</p>
+    </details>
 
     <details class="vcm-fold">
       <summary>Network share <span class="vcm-sum" id="s-share"></span></summary>

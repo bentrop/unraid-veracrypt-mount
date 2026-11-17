@@ -689,6 +689,25 @@ call `include/actions.php` the way the web page will, without a browser.
   17:29:37; the hook started `vcm-test-a` at 17:29:45 and `vcm-test-b` at 17:29:47 (the
   set delay of 2 seconds), while Unraid was still starting its own containers (done at
   17:30:09), so Unraid's start did not wait for it. Passed.
+- PIM and keyfile through `cryptsetup` (KEY-2, SEC-1, 2026-11-17). `throwaway-pim` (a
+  copy of `throwaway-ntfs`) given a PIM and the keyfile `throwaway-key` in VeraCrypt on
+  Windows. `cryptsetup tcryptOpen --veracrypt --veracrypt-query-pim --key-file <path>
+  --test-passphrase` (checks without unlocking), with the password and then the PIM as
+  two lines on standard input: code 0. A wrong PIM and a missing keyfile: code 2 each.
+  So the PIM never needs to be on a command line. Not tested yet: a keyfile without a
+  password.
+- Keyfiles, PIM and hidden volumes in the engine (KEY-2, KEY-3, VOL-3, version
+  2026.11.17o). `vcmount mount --file <throwaway-pim> --name tw-pim --pim --keyfile
+  <throwaway-key>`, password and PIM as two lines on standard input. A wrong PIM: code 2,
+  "wrong password, PIM or keyfile". Without the keyfile: code 2. Right PIM and keyfile:
+  mounted (ntfs3), then dismounted. A saved volume stores `keyfiles` (paths) and `pim`
+  (only that it asks for one). Hidden volumes (`--tcrypt-hidden`) are built but not
+  tested yet: no throwaway volume with a hidden volume exists.
+- The same through the web page (2026-11-17, version 2026.11.17o, by the owner):
+  `throwaway-pim` saved with its keyfile and "Ask for a PIM"; the mount dialog showed
+  the keyfile and a PIM field, refused a wrong PIM and mounted with the right one;
+  "Mount a file once" with keyfile and PIM mounted and dismounted; an ordinary volume
+  mounted as before, without a PIM field. Passed.
 
 **Engine tests (2026-11-15, all passed, on `throwaway-ntfs`, run with
 `scripts/enginetest.sh`).**

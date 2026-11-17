@@ -535,6 +535,18 @@
         $('#vcm-user').val(once ? '' : 'veracrypt:' + name);
         $('#vcm-once-fields').prop('hidden', !once);
         $('#vcm-password').val('').attr('autocomplete', once ? 'off' : 'current-password');
+        // KEY-2: what this volume needs besides the password.
+        var v = null;
+        lastVolumes.forEach(function (x) { if (x.name === name) { v = x; } });
+        var keyfiles = (v && v.keyfiles) || [];
+        $('#vcm-pim').val('').attr('placeholder', once ? 'only if the volume has one' : '');
+        $('#vcm-pim-label').prop('hidden', blocked || !(once || (v && v.pim)));
+        $('#vcm-keyfile, #vcm-name, #vcm-file').val('');
+        $('#vcm-hidden, #vcm-read-only').prop('checked', false);
+        $('#vcm-keyfile-note').prop('hidden', blocked || !keyfiles.length)
+            .text((keyfiles.length > 1 ? 'Keyfiles: ' : 'Keyfile: ') + keyfiles.join(', ') +
+                  '. Leave the password empty if the volume has none.' +
+                  (v && v.hidden ? ' Opens the hidden volume.' : ''));
         $('#vcm-mount-error').prop('hidden', true).text('');
         $('#vcm-dialog-http').prop('hidden', !overHttp || blocked);
         $('#vcm-dialog-https').prop('hidden', !blocked);
@@ -550,7 +562,7 @@
 
     function closeDialog() {
         if (mounting) { return; }   // not while a mount is on its way
-        $('#vcm-password').val('');
+        $('#vcm-password, #vcm-pim').val('');
         $('#vcm-modal').prop('hidden', true);
         mountTarget = null;
     }
@@ -660,16 +672,37 @@
     function submitMount(event) {
         event.preventDefault();
         if (mounting || passwordBlocked()) { return; }   // never send a password the setting forbids
-        mounting = true;
         var once = mountTarget === null;
         var field = $('#vcm-password');
+        var pimField = $('#vcm-pim');
+        var v = null;
+        lastVolumes.forEach(function (x) { if (x.name === mountTarget) { v = x; } });
         var data = { action: once ? 'mount-once' : 'mount', name: once ? $.trim($('#vcm-name').val()) : mountTarget };
+        var keyfile = false;
         if (once) {
             data.file = $.trim($('#vcm-file').val());
             data.read_only = $('#vcm-read-only').is(':checked') ? '1' : '0';
+            data.hidden = $('#vcm-hidden').is(':checked') ? '1' : '0';
+            var k = $.trim($('#vcm-keyfile').val());
+            if (k) { data.keyfiles = [k]; keyfile = true; }
+        } else {
+            keyfile = !!(v && v.keyfiles && v.keyfiles.length);
         }
+        var pim = $.trim(pimField.val());
+        if (field.val() === '' && !keyfile) { dialogError('Enter the password.'); field.trigger('focus'); return; }
+        if (!once && v && v.pim && pim === '') { dialogError('Enter the PIM.'); pimField.trigger('focus'); return; }
+        if (pim !== '' && !/^[1-9][0-9]{0,8}$/.test(pim)) {
+            dialogError('The PIM must be a whole number from 1 upwards, without spaces.');
+            pimField.trigger('focus');
+            return;
+        }
+        mounting = true;
         data.password = field.val();
+        data.no_password = data.password === '' ? '1' : '0';
+        if (pim !== '') { data.pim = pim; }
         field.val('');
+        pimField.val('');
+        pim = null;
         $('#vcm-mount-error').prop('hidden', true);
         $('#vcm-mount-submit').prop('disabled', true).val('Unlocking…');
 
@@ -685,6 +718,7 @@
             }
         });
         data.password = null;
+        data.pim = null;
     }
 
     // ---- Dismount ---------------------------------------------------------
@@ -820,6 +854,16 @@
             '</li>').attr('data-container', dep.container);
     }
 
+    function keyfileItem(path) {
+        return $('<li><span class="vcm-keyfile-path"></span> ' +
+                 '<a href="#" class="vcm-keyfile-remove" title="Remove">&#10005;</a></li>')
+            .attr('data-path', path).find('.vcm-keyfile-path').text(path).end();
+    }
+
+    function keyfilePaths() {
+        return $('#e-keyfiles li').map(function () { return $(this).attr('data-path'); }).get();
+    }
+
     function depChoices() {
         var used = $('#e-deps li').map(function () { return $(this).attr('data-container'); }).get();
         var free = (options.containers || []).filter(function (c) { return used.indexOf(c) < 0; });
@@ -840,6 +884,11 @@
                     ($('#e-export').val() === 'hidden' ? ', hidden' : '');
         }
         $('#s-share').text(share);
+        var unlock = ['password'];
+        var kf = keyfilePaths().length;
+        if (kf) { unlock.push(kf === 1 ? '1 keyfile' : kf + ' keyfiles'); }
+        if ($('#e-pim').is(':checked')) { unlock.push('PIM'); }
+        $('#s-unlock').text(unlock.join(', ') + ($('#e-hidden').is(':checked') ? ' · hidden volume' : ''));
         var deps = $('#e-deps li').map(function () { return $(this).attr('data-container'); }).get();
         $('#s-deps').text(deps.length ? deps.join(', ') : 'none');
         var name = $.trim($('#e-name').val());
@@ -898,6 +947,8 @@
         applyReadOnly();
         $('.vcm-share-on').toggle($('#e-share').val() === 'yes');
         $('.vcm-mount-share').toggle($('#e-mount-mode').val() === 'share');
+        // VOL-4: the warning matters only while the outer volume may be written.
+        $('#e-hidden-warn').toggle(!$('#e-ro').is(':checked') && !$('#e-hidden').is(':checked'));
         var name = $.trim($('#e-name').val());
         $('#e-own-point').text(name ? '/mnt/addons/' + name : '');
         updateSummaries();
@@ -969,6 +1020,11 @@
             $('#e-file').val(v.file);
             $('#e-display').val(v.display_name || '');
             $('#e-ro').prop('checked', !!v.read_only);
+            $('#e-pim').prop('checked', !!v.pim);
+            $('#e-hidden').prop('checked', !!v.hidden);
+            $('#e-keyfile').val('');
+            $('#e-keyfiles').empty();
+            (v.keyfiles || []).forEach(function (p) { $('#e-keyfiles').append(keyfileItem(p)); });
             var own = !v.mount_at || v.mount_at === '/mnt/addons/' + v.name;
             $('#e-mount-mode').val(own ? 'own' : 'share');
             $('#e-mount-at').val(own ? '' : v.mount_at);
@@ -1015,8 +1071,10 @@
         if (display && display !== name) { v.display_name = display; }
         if ($('#e-mount-mode').val() === 'share') { v.mount_at = $.trim($('#e-mount-at').val()); }
         if ($('#e-ro').is(':checked')) { v.read_only = true; }
-        // Not editable yet, but kept as it was.
-        config.volumes.forEach(function (x) { if (x.name === editing && x.hidden) { v.hidden = true; } });
+        if ($('#e-hidden').is(':checked')) { v.hidden = true; }
+        if ($('#e-pim').is(':checked')) { v.pim = true; }
+        var keyfiles = keyfilePaths();
+        if (keyfiles.length) { v.keyfiles = keyfiles; }
         if ($('#e-share').val() === 'yes') {
             var users = {};
             $('.e-access').each(function () {
@@ -1044,6 +1102,7 @@
         if (v.mount_at !== undefined && v.mount_at.indexOf('/mnt/user/') !== 0) {
             return 'Choose a folder inside a share: its path starts with /mnt/user/.';
         }
+        if ((v.keyfiles || []).indexOf(v.file) >= 0) { return 'The volume file cannot be its own keyfile.'; }
         if (v.share && !Object.keys(v.share.users).length) { return 'Give at least one user access to the share, or turn sharing off.'; }
         var bad = (v.dependents || []).some(function (d) {
             return !(d.grace >= 1 && d.grace <= 600 && d.delay >= 0 && d.delay <= 600);
@@ -1147,6 +1206,7 @@
 
         // The edit panel.
         $('#vcm-edit-form').on('input change', function (e) {
+            if (e.target.id === 'e-keyfile') { return; }   // counts only once added
             if (e.target.id === 'e-file') { suggestName(); }
             markDirty();
             toggleFields();
@@ -1156,6 +1216,26 @@
             if (!container) { return; }
             $('#e-deps').append(depItem({ container: container, grace: 60, delay: 0 }));
             depChoices();
+            markDirty();
+            updateSummaries();
+        });
+        // Keyfiles (KEY-2): pick a file, then add it to the list.
+        $('#e-keyfile-add').on('click', function () {
+            var path = $.trim($('#e-keyfile').val());
+            if (!path) { return; }
+            if (path.charAt(0) !== '/') { editError('A keyfile path starts with /.'); return; }
+            if (keyfilePaths().indexOf(path) < 0) {
+                if (keyfilePaths().length >= 8) { editError('At most 8 keyfiles.'); return; }
+                $('#e-keyfiles').append(keyfileItem(path));
+            }
+            $('#e-keyfile').val('');
+            editError('');
+            markDirty();
+            updateSummaries();
+        });
+        $('#e-keyfiles').on('click', '.vcm-keyfile-remove', function (e) {
+            e.preventDefault();
+            $(this).closest('li').remove();
             markDirty();
             updateSummaries();
         });
@@ -1184,6 +1264,8 @@
             $('#e-file').fileTreeAttach();
             $('#e-mount-at').fileTreeAttach();
             $('#vcm-file').fileTreeAttach();   // "Mount a file once" (Volumes tab only)
+            $('#e-keyfile').fileTreeAttach();
+            $('#vcm-keyfile').fileTreeAttach();
         }
         // "Mount a file once": fill an empty name from the chosen file, as "Add volume" does.
         $('#vcm-file').on('input change', suggestOnceName);
