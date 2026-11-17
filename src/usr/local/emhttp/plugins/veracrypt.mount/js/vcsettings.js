@@ -10,7 +10,7 @@
 
     var URL = '/plugins/veracrypt.mount/include/action.php';
     var overHttp = window.location.protocol === 'http:';
-    var FIELDS = { force_at_array_stop: '#s-force', require_https: '#s-https', show_on_main: '#s-main' };
+    var FIELDS = { force_at_array_stop: '#s-force', require_https: '#s-https', log_names: '#s-lognames', show_on_main: '#s-main' };
 
     var config = null;   // the saved settings as "vcmount config" returns them
     var dirty = false;

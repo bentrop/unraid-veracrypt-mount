@@ -182,6 +182,15 @@
         return 'greenbar';
     }
 
+    /**
+     * The drive icon in front of a volume file: like Unraid's disks, a link with
+     * a tooltip that opens the volume's information window.
+     */
+    function infoIcon(name) {
+        return '<a class="info hand vcm-info" data-name="' + esc(name) + '">' +
+               '<i class="icon-disk-encrypted icon"></i><span>Volume information</span></a>';
+    }
+
     /** A link to Unraid's file manager for a folder, written as the Main page writes it. */
     function browseLink(dir) {
         return '<a class="view info" href="/Main/Browse?dir=' + encodeURIComponent(dir) + '">' +
@@ -242,7 +251,7 @@
         }
         return '<tr>' +
             '<td>' + rowStart(v, label) + '</td>' +
-            '<td><i class="icon-disk-encrypted icon"></i>' + esc(v.file || '-') + '</td>' +
+            '<td>' + infoIcon(v.name) + esc(v.file || '-') + '</td>' +
             '<td colspan="3">' + esc(v.mounted_at || '-') + '</td>' +
             '<td>' + tileShare(v) + '</td>' +
             '<td>' + esc(mountedNow && v.filesystem ? v.filesystem : '-') + '</td>' +
@@ -321,7 +330,7 @@
             buttons += '<input type="button" class="vcm-edit" data-name="' + name + '" value="Edit">';
         }
         return '<tr>' +
-            '<td><div class="vcm-vol"><span class="vcm-vol-icons">' + rowStart(v, '') + '</span>' +
+            '<td><div class="vcm-vol"><span class="vcm-vol-icons">' + rowStart(v, '') + infoIcon(v.name) + '</span>' +
                 '<div class="vcm-vol-text">' + twoLines(label, where, title) + '</div></div></td>' +
             '<td>' + shareCell(v) + '</td>' +
             '<td>' + (deps.length
@@ -371,6 +380,71 @@
                                         '" class="vcm-empty">' + esc(a.error) + '</td></tr>');
                 }
             }
+        });
+    }
+
+    // ---- Volume information ---------------------------------------------
+
+    /** One labelled line of the information window; nothing when there is no value. */
+    function infoRow(label, value) {
+        return value === null || value === undefined || value === '' ? ''
+            : '<dt>' + esc(label) + '</dt><dd>' + value + '</dd>';
+    }
+
+    /**
+     * Show what "vcmount info" reports about one volume, read-only, in a window
+     * in the style of the mount dialog. Built when first needed.
+     */
+    function showInfo(name) {
+        act({ action: 'info', name: name }).then(function (a) {
+            if (!a.ok) { message('No information', esc(a.error || 'The volume could not be read.'), 'error'); return; }
+            var v = a.volume;
+            var html = '<dl class="vcm-info-list">' +
+                infoRow('State', esc(v.state) + (v.read_only && v.state === 'mounted' ? ', read-only' : '') +
+                        (v.saved ? '' : ' (not saved)')) +
+                infoRow('Volume file', esc(v.file || '-')) +
+                infoRow('File', a.file ? size(a.file.size_bytes) + ', changed ' +
+                        esc(new Date(a.file.modified).toLocaleString()) : null);
+            if (a.crypt) {
+                html += infoRow('Encryption', esc((a.crypt.cipher || '?') + (a.crypt.keysize ? ', key ' + a.crypt.keysize : ''))) +
+                        infoRow('Device', esc((a.crypt.device || '') + (a.crypt.mode ? ', ' + a.crypt.mode : '')));
+            }
+            if (a.filesystem) {
+                html += infoRow('File system', esc([a.filesystem.type, a.filesystem.driver ? 'driver ' + a.filesystem.driver : ''].filter(Boolean).join(', '))) +
+                        infoRow('Label', a.filesystem.label ? esc(a.filesystem.label) : null) +
+                        infoRow('UUID', a.filesystem.uuid ? esc(a.filesystem.uuid) : null) +
+                        infoRow('Options', a.filesystem.options ? '<code>' + esc(a.filesystem.options) + '</code>' : null);
+            }
+            html += infoRow('Mounted at', v.mounted_at ? esc(v.mounted_at) : null);
+            if (v.state === 'mounted' && v.size_bytes > 0) {
+                html += infoRow('Usage', size(v.size_bytes - v.free_bytes) + ' used, ' + size(v.free_bytes) + ' free of ' + size(v.size_bytes));
+            }
+            html += infoRow('Share', v.share ? $('<div>').html(shareCell(v)).text().replace(/\s+/g, ' ') : 'not shared');
+            html += infoRow('Dependents', (a.dependents || []).length ? a.dependents.map(function (d) {
+                return esc(d.container) + ' <span class="vcm-dim">(' + esc(d.state) + ', stop within ' + esc(d.grace) + ' s)</span>';
+            }).join('<br>') : 'none') + '</dl>';
+            if (v.saved && !a.log_names) {
+                html += '<h4>Recent log</h4><p class="vcm-note">Names are not shown in the logs (Settings tab, ' +
+                        '"Show volume names in logs"), so there is no history for this volume.</p>';
+            } else if (v.saved) {
+                html += '<h4>Recent log</h4>' + ((a.log || []).length
+                    ? '<pre class="vcm-info-log">' + a.log.map(esc).join('\n') + '</pre>'
+                    : '<p class="vcm-note">Nothing about this volume in the current system log.</p>');
+            }
+
+            var box = $('#vcm-info');
+            if (!box.length) {
+                box = $('<div id="vcm-info" class="vcm-modal" hidden><div class="vcm-box vcm-info-box" role="dialog" aria-labelledby="vcm-info-title">' +
+                        '<h3 id="vcm-info-title"></h3><div id="vcm-info-body"></div>' +
+                        '<div class="vcm-buttons"><input type="button" id="vcm-info-close" value="Close"></div></div></div>').appendTo('body');
+                box.on('click', function (e) { if (e.target === this) { box.prop('hidden', true); } });
+                $('#vcm-info-close').on('click', function () { box.prop('hidden', true); });
+                $(document).on('keydown', function (e) { if (e.key === 'Escape') { box.prop('hidden', true); } });
+            }
+            $('#vcm-info-title').text(v.display_name);
+            $('#vcm-info-body').html(html);
+            box.prop('hidden', false);
+            $('#vcm-info-close').trigger('focus');
         });
     }
 
@@ -1002,6 +1076,7 @@
             if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $(this).trigger('click'); }
         });
         $('#vcm-rows').on('click', '.vcm-edit', function () { openEdit($(this).attr('data-name')); });
+        $('#vcm-rows').on('click', '.vcm-info', function (e) { e.preventDefault(); showInfo($(this).attr('data-name')); });
         $('#vcm-add').on('click', function () { openEdit(''); });
         $('#vcm-mount-all').on('click', mountAll);
         $('#vcm-once').on('click', function () { stopQueue(); openDialog(null); });

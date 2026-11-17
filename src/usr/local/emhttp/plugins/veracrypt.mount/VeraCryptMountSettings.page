@@ -48,6 +48,19 @@ $vcm = '/plugins/veracrypt.mount';
   </blockquote>
 
   <dl class="vcm-form">
+    <dt>Show volume names in logs</dt>
+    <dd><select id="s-lognames"><option value="no">No</option><option value="yes">Yes</option></select></dd>
+  </dl>
+  <blockquote class="inline_help">
+    <p>Yes: when volumes are mounted, dismounted or run into problems, Unraid's system log and
+       notifications name the volume and its containers. Useful when tracking down a problem.</p>
+    <p>No (default): the same events are recorded without names, so the system log (which Unraid
+       also copies to the flash drive at shutdown and includes in diagnostics) and the
+       notifications do not reveal which volumes you have. The Volumes tab still shows everything.
+       Lines written before you switch this off stay until Unraid's log is renewed.</p>
+  </blockquote>
+
+  <dl class="vcm-form">
     <dt>Show the volumes on the Main page</dt>
     <dd><select id="s-main"><option value="no">No</option><option value="yes">Yes</option></select></dd>
   </dl>

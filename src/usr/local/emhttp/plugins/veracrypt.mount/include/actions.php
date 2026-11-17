@@ -45,7 +45,7 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
     $name = is_string($post['name'] ?? null) ? $post['name'] : '';
     $stdin = null;
 
-    $needs_name = ['status', 'mount', 'mount-once', 'dismount', 'dismount-force'];
+    $needs_name = ['status', 'info', 'mount', 'mount-once', 'dismount', 'dismount-force'];
     if (in_array($action, $needs_name, true) && !preg_match(VCM_NAME, $name)) {
         return vcm_refuse('That is not a valid volume name.');
     }
@@ -111,6 +111,9 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
             break;
         case 'privacy':
             $args = ['privacy'];
+            break;
+        case 'info':
+            $args = ['info', $name];
             break;
         case 'config':
             $args = ['config'];

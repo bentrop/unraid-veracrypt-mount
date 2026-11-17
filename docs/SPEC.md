@@ -268,6 +268,11 @@ The design is in `docs/DESIGN-engine.md`.
 
 - **PRIV-1** The plugin's log records events only (mounted, dismounted, failed), never
   file names from inside a volume.
+  Since 2026-11-17 a setting **"Show volume names in logs"** (off by default) decides
+  whether those events, and the fault notifications, name the volume and its
+  containers. Off, every name is replaced by "(name hidden)", because Unraid copies the
+  system log to the flash drive at shutdown, puts it into diagnostics and archives
+  notifications on the flash. The information window then shows no log history.
 - **PRIV-2** For volumes mounted without saving, nothing identifying is logged.
 - **PRIV-3 (Agreed, extended 2026-11-16)** Warn when a known activity-logging plugin
   (for example File Activity) is installed and could record file names from mounted
@@ -614,6 +619,14 @@ call `include/actions.php` the way the web page will, without a browser.
   Passed. Kept on purpose: the lock colours that match each page (black on the
   Dashboard, Unraid's link blue on the Main page and the Volumes tab), the plain-HTTP
   banner, and the tile's column layout.
+- Volume information and log names (2026-11-17, versions 2026.11.17i and j): the drive
+  icon (Main page: before the volume file; Volumes tab: after the lock) opens a window
+  with what `vcmount info` reads without the password: volume file, encryption
+  (`cryptsetup status`), file system (`blkid`, mount options), share, dependents with
+  their state, and, only when names may be logged, the plugin's recent log lines for
+  the volume. With "Show volume names in logs" off (the default), a dismount on Bob was
+  logged as `veracrypt.mount: dismounted (name hidden)`. Passed. Lock colours follow
+  Unraid's status colours: mounted `--green-200`, locked the theme's text colour.
 
 **Engine tests (2026-11-15, all passed, on `throwaway-ntfs`, run with
 `scripts/enginetest.sh`).**

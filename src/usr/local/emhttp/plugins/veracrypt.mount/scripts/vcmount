@@ -66,6 +66,7 @@ const SETTINGS = [
     'force_at_array_stop' => true,   // LIFE-10
     'require_https' => true,         // UI-5; on by default since 2026-11-17 (review P1)
     'show_on_main' => false,         // UI-3
+    'log_names' => false,            // PRIV-1: name volumes and containers in log lines and notifications
 ];
 
 // The largest settings file save-config accepts, in bytes.
@@ -93,6 +94,8 @@ Usage:
   vcmount repair-shares                      make the SMB shares match the mounted volumes
   vcmount options                            list the users and containers the forms offer
   vcmount busy                               say whether another vcmount action is running
+  vcmount info <name>                        details of one volume: file, encryption,
+                                             filesystem, share, dependents, recent log
   vcmount privacy                            check activity-logging plugins (PRIV-3): the
                                              exclusion line File Activity needs, if any
   vcmount config                             show the saved settings and their revision
@@ -530,6 +533,19 @@ function report(bool $json, string $name, string $text, array $notes = []): void
  */
 function log_event(string $message, bool $notify = false): void
 {
+    // Unless the setting "Show volume names in logs" is on, every name is left
+    // out. Messages put every volume and container name in double quotes, so
+    // this catches them all. The system log is copied to the flash drive at
+    // shutdown and goes into diagnostics; notifications are archived there too.
+    $names = false;
+    try {
+        $names = setting('log_names', SETTINGS['log_names']);
+    } catch (Throwable $e) {
+        // A settings file that cannot be read must not stop the log line.
+    }
+    if (!$names) {
+        $message = preg_replace('/"[^"]*"/', '(name hidden)', $message);
+    }
     openlog('veracrypt.mount', 0, LOG_USER);
     syslog(LOG_INFO, $message);
     closelog();
@@ -1485,7 +1501,7 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
             foreach (array_keys($users['containers']) as $id) {
                 run([program('docker'), 'stop', '-t', (string) FORCE_WAIT, (string) $id], FORCE_WAIT + 30);
             }
-            $stopped = implode(', ', $users['containers']);
+            $stopped = implode(', ', array_map(fn($c) => "\"$c\"", $users['containers']));
             $notes[] = "Forced: stopped $stopped.";
             if ($saved) {
                 log_event("dismount of \"$name\" forced: stopped $stopped", true);
@@ -1926,6 +1942,139 @@ function command_busy(array $args, bool $json): int
     return CODE_OK;
 }
 
+/** The plugin's log lines in the system log, newest last, that mention one volume. */
+const SYSLOG = '/var/log/syslog';
+const INFO_LOG_LINES = 15;
+const INFO_LOG_TAIL = 2 * 1024 * 1024;   // read at most the last 2 MB of the system log
+
+function volume_log_lines(string $name): array
+{
+    $handle = @fopen(SYSLOG, 'r');
+    if ($handle === false) {
+        return [];
+    }
+    $size = filesize(SYSLOG) ?: 0;
+    if ($size > INFO_LOG_TAIL) {
+        fseek($handle, $size - INFO_LOG_TAIL);
+        fgets($handle);   // drop the line cut in half
+    }
+    $lines = [];
+    // Log lines name a volume in double quotes, and names are only letters,
+    // digits, - and _, so this cannot match a longer name by accident.
+    $needle = '"' . $name . '"';
+    while (($line = fgets($handle)) !== false) {
+        if (strpos($line, 'veracrypt.mount') !== false && strpos($line, $needle) !== false) {
+            $lines[] = rtrim($line, "\n");
+            if (count($lines) > INFO_LOG_LINES) {
+                array_shift($lines);
+            }
+        }
+    }
+    fclose($handle);
+    return $lines;
+}
+
+/**
+ * Details of one volume for the information window (the drive icon in the web
+ * pages): the volume file, and while unlocked the encryption, device, file
+ * system and mount options, then share, dependents and recent log lines.
+ * Reads only; never needs the password. For a volume that is not saved
+ * ("mount once") only its live state is shown and no log lines are searched.
+ */
+function command_info(array $args, bool $json): int
+{
+    if (count($args) !== 1) {
+        throw new Fail('Usage: vcmount info <name>', CODE_USAGE);
+    }
+    $name = $args[0];
+    if (!preg_match(NAME_PATTERN, $name)) {
+        throw new Fail('That is not a valid volume name.', CODE_USAGE);
+    }
+    $saved = load_config()[$name] ?? null;
+    $live = live_volumes()[$name] ?? null;
+    if ($saved === null && $live === null) {
+        throw new Fail("There is no volume named \"$name\".", CODE_USAGE);
+    }
+    $v = describe($name, $saved, $live);
+
+    $info = ['volume' => $v, 'file' => null, 'crypt' => null, 'filesystem' => null,
+             'dependents' => [], 'log' => []];
+
+    if (is_string($v['file']) && is_file($v['file'])) {
+        $info['file'] = ['size_bytes' => filesize($v['file']) ?: null, 'modified' => date('c', filemtime($v['file']) ?: 0)];
+    }
+
+    if ($live !== null) {
+        $device = MAPPER_DIR . '/' . MAPPER_PREFIX . $name;
+        $r = run([program('cryptsetup'), 'status', MAPPER_PREFIX . $name], TOOL_TIMEOUT);
+        $crypt = [];
+        foreach (preg_split('/\n/', $r['out']) as $line) {
+            if (preg_match('/^\s*(type|cipher|keysize|device|loop|sector size|size|mode):\s*(.+)$/', $line, $m)) {
+                $crypt[str_replace(' ', '_', $m[1])] = trim($m[2]);
+            }
+        }
+        $info['crypt'] = $crypt ?: null;
+
+        $fs = [];
+        $r = run([program('blkid'), '-o', 'export', $device], TOOL_TIMEOUT);
+        foreach (preg_split('/\n/', $r['out']) as $line) {
+            if (preg_match('/^(TYPE|LABEL|UUID)=(.*)$/', $line, $m)) {
+                $fs[strtolower($m[1])] = $m[2];
+            }
+        }
+        if ($v['mounted_at'] !== null) {
+            foreach (@file('/proc/mounts', FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+                $f = explode(' ', $line);
+                if (count($f) >= 4 && unescape_mount_field($f[1]) === $v['mounted_at']) {
+                    $fs['driver'] = $f[2];
+                    $fs['options'] = $f[3];
+                }
+            }
+        }
+        $info['filesystem'] = $fs ?: null;
+    }
+
+    if ($saved !== null) {
+        $ready = docker_ready();
+        foreach ($saved['dependents'] as $dependent) {
+            $running = $ready ? container_running($dependent['container']) : null;
+            $info['dependents'][] = [
+                'container' => $dependent['container'],
+                'state' => !$ready ? 'unknown' : ($running === null ? 'not found' : ($running ? 'running' : 'stopped')),
+                'grace' => $dependent['grace'],
+                'delay' => $dependent['delay'],
+            ];
+        }
+        // Older lines may still name the volume; with the setting off none are shown.
+        $info['log_names'] = setting('log_names', SETTINGS['log_names']);
+        $info['log'] = $info['log_names'] ? volume_log_lines($name) : [];
+    }
+
+    if ($json) {
+        echo json_encode(['ok' => true] + $info, JSON_UNESCAPED_SLASHES), "\n";
+        return CODE_OK;
+    }
+    echo 'Name:        ', $v['name'], $v['saved'] ? '' : ' (not saved)', "\n";
+    echo 'State:       ', $v['state'], "\n";
+    echo 'Volume file: ', $v['file'] ?? '-', "\n";
+    if ($info['file'] !== null) {
+        echo '             ', format_size($info['file']['size_bytes']), ', changed ', $info['file']['modified'], "\n";
+    }
+    foreach ($info['crypt'] ?? [] as $key => $value) {
+        printf("%-13s%s\n", ucfirst(str_replace('_', ' ', $key)) . ':', $value);
+    }
+    foreach ($info['filesystem'] ?? [] as $key => $value) {
+        printf("%-13s%s\n", ucfirst($key) . ':', $value);
+    }
+    foreach ($info['dependents'] as $d) {
+        echo 'Dependent:   ', $d['container'], ' (', $d['state'], ")\n";
+    }
+    foreach ($info['log'] as $line) {
+        echo 'Log:         ', $line, "\n";
+    }
+    return CODE_OK;
+}
+
 /**
  * The fingerprint of the settings file's content, or "none" when there is no
  * file. The web page sends it back when saving, so a change made meanwhile
@@ -2132,6 +2281,8 @@ function main(array $argv): int
                 return command_busy($args, $json);
             case 'privacy':
                 return command_privacy($args, $json);
+            case 'info':
+                return command_info($args, $json);
             case 'config':
                 return command_config($args, $json);
             case 'save-config':

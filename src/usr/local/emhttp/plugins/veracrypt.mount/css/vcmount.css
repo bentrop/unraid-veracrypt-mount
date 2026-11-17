@@ -89,7 +89,12 @@ tr.vcm-row td.vcm-empty { text-align: center; opacity: .7; }
    sit under its Temp, SMART and Utilization columns. Built like Unraid's span.w26. */
 span.vcm-col-name { min-width: 44%; max-width: 44%; display: inline-block; float: left; overflow: hidden; text-overflow: ellipsis; }
 tr.vcm-row span.vcm-col-name { white-space: nowrap; }
-.vcm-tile-icon.mounted { color: #3c9a3c; }
+/* Lock colours as Unraid's own status colours (default-color-palette.css): a mounted
+   volume in the active green of its status dots, a locked one in the theme's text
+   colour (also inside the links of the Main page and the Volumes tab), the rare
+   "unlocked, not mounted" in orange. */
+.vcm-tile-icon.mounted, a .vcm-tile-icon.mounted { color: var(--green-200, #33cc33); }
+.vcm-tile-icon.locked, a .vcm-tile-icon.locked { color: var(--text-color, inherit); }
 .vcm-tile-icon.unlocked { color: #d08a00; }
 .vcm-tile-icon[role=button] { cursor: pointer; display: inline-block; padding: 4px 4px 4px 0; margin-left: 2px;
                               transition: transform .15s ease-out, color .15s ease-out; transform-origin: left center; }
@@ -163,3 +168,15 @@ table.vcm-manage td.vcm-actions input[type=button] { width: calc(50% - 6px); min
 .vcm-split > span:last-child input[type=button] { width: calc(50% - 6px); min-width: 0; margin: 0 0 0 4px;
                                                  padding-left: 0; padding-right: 0; }
 @media (max-width: 760px) { .vcm-split > span:last-child { flex-basis: 24%; } }
+
+/* The volume information window (drive icon). */
+.vcm-box.vcm-info-box { max-width: 640px; max-height: 85vh; overflow: auto; }
+.vcm-info-list { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 8px 0; }
+.vcm-info-list dt { opacity: .7; }
+.vcm-info-list dd { margin: 0; overflow-wrap: anywhere; }
+.vcm-info-box h4 { margin: 14px 0 6px; }
+.vcm-info-log { font-size: .85em; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14em; overflow: auto;
+                padding: 6px 8px; border: 1px solid rgba(128, 128, 128, .3); border-radius: 4px; margin: 0; }
+.vcm-info { cursor: pointer; }
+/* On the Volumes tab the drive icon sits in the icon strip after the lock. */
+.vcm-vol-icons .vcm-info .icon { margin: 0 2px 0 4px; }
