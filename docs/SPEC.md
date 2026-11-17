@@ -164,8 +164,10 @@ Nothing needs to be installed on the server.
   security is offered; "Public" and "Secure" are left out because they would give
   guests access to the decrypted data.
 - **SHR-2 (Agreed)** Option to hide the share from network browsing.
-- **SHR-3 (Verify)** Implement sharing the way Unassigned Devices does, without editing
-  Unraid's own Samba configuration files.
+- **SHR-3 (Agreed, confirmed 2026-11-17)** Implement sharing the way Unassigned Devices
+  does, without editing Unraid's own Samba configuration files. Built that way: one file
+  per share in `/etc/samba/veracrypt-shares/`, included from `smb-unassigned.conf`,
+  which Unraid's `smb.conf` already includes (DESIGN-engine, section 9b; test 10).
 
 ### 5.5 Docker control
 
@@ -198,9 +200,10 @@ Nothing needs to be installed on the server.
 
 - **LIFE-1 (Agreed)** On array stop, shutdown and reboot: dependents are stopped
   gracefully, then all volumes are dismounted, before the array disks unmount.
-- **LIFE-2 (Verify)** Hook the right Unraid events (candidates: `stopping_docker`,
-  `stopping_svcs`, `unmounting_disks`, `docker_started`, `started`). Confirm names and
-  order on 7.4 in `/usr/local/sbin/emhttp_event`.
+- **LIFE-2 (Agreed, confirmed 2026-11-17)** Hook the right Unraid events. Names and
+  order confirmed on 7.4 (test 8). The plugin hooks `stopping_docker` (stop dependents
+  while Docker still runs) and `unmounting_disks` (dismount all before the disks
+  unmount); array stop, reboot and the power-cycle recovery were tested with them.
 - **LIFE-3 (Agreed)** Warn if the sum of grace periods exceeds Unraid's shutdown
   timeout, because Unraid forces the shutdown after that.
 - **LIFE-4 (Proposed)** If the Docker service is stopped or restarted, dependents follow
