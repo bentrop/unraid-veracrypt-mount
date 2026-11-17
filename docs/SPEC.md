@@ -58,7 +58,8 @@ Nothing needs to be installed on the server.
 
 - VeraCrypt **container files** stored on Unraid shares.
 - Standard and hidden volumes; password, PIM and keyfiles.
-- NTFS and exFAT inside the volumes, mounted read-write, still usable on Windows.
+- Inside the volumes, every file system both VeraCrypt and Unraid support (FS-1),
+  mounted read-write; FAT32, exFAT and NTFS stay usable on Windows.
 - Several volumes mounted at once.
 - Per-volume network share over SMB.
 - Docker control for Unraid-template containers and Compose stacks.
@@ -115,7 +116,13 @@ Nothing needs to be installed on the server.
 
 ### 5.3 Filesystems
 
-- **FS-1 (Agreed)** NTFS and exFAT, read-write.
+- **FS-1 (Agreed, extended 2026-11-17)** Every file system that both VeraCrypt and
+  Unraid support, read-write: FAT32 (`vfat`), exFAT, NTFS (`ntfs3`), ext2/3/4 (`ext4`),
+  XFS and Btrfs. Not ReFS, HFS+ or APFS (Unraid has no driver) and not ZFS (a pool, not
+  one file system to mount). FAT32, exFAT and NTFS have no owners, so their files appear
+  as `nobody:users` (FS-4); ext4, XFS and Btrfs keep real owners and permissions, which
+  lets containers such as databases run from them, but VeraCrypt on Windows cannot open
+  them.
 - **FS-2 (Verify)** NTFS driver: start with the kernel driver `ntfs3`; `ntfs-3g` is
   available as a fallback. Decide after testing. A newer kernel driver, called plain
   `ntfs` (formerly NTFSPLUS), comes with a working check-and-repair tool. It is not
@@ -133,6 +140,14 @@ Nothing needs to be installed on the server.
 - **FS-5 (Agreed)** A volume marked dirty (after a crash or power cut) is **not**
   force-mounted. The plugin reports it and explains the repair: `chkdsk` on Windows for
   NTFS. For exFAT, offer `fsck.exfat` after explicit confirmation.
+- **FS-6 (Agreed 2026-11-17)** On ext4, XFS and Btrfs the top folder of a new volume
+  belongs to `root:root` with `0755`, so its share (which writes as `nobody:users`)
+  cannot write. The mount never changes permissions by itself. When a saved volume with
+  a read-write share is mounted read-write and its top folder blocks the share, the page
+  asks "Allow writing over the network?"; on yes, `vcmount fix-top` sets only the top
+  folder to `nobody:users` and `0777`. The information window shows the top folder's
+  owner and mode, with "Let the share write" (the same) and "Fix permissions…", which
+  after a confirmation runs Unraid's `newperms` on the whole volume in the background.
 
 ### 5.4 Mount location and sharing
 
@@ -311,7 +326,7 @@ The design is in `docs/DESIGN-engine.md`.
   in to the web UI.
 - There is no hidden-volume protection; the read-only switch is the safeguard.
 - A volume must never be mounted on the server and on Windows at the same time.
-- NTFS and exFAT carry no Unix permissions; some Docker applications (databases
+- FAT32, exFAT and NTFS carry no Unix permissions; some Docker applications (databases
   especially) will not run from them.
 - exFAT has no journal and is the more fragile choice after a power cut.
 - Over plain HTTP the volume password crosses the LAN unencrypted.
@@ -627,6 +642,23 @@ call `include/actions.php` the way the web page will, without a browser.
   the volume. With "Show volume names in logs" off (the default), a dismount on Bob was
   logged as `veracrypt.mount: dismounted (name hidden)`. Passed. Lock colours follow
   Unraid's status colours: mounted `--green-200`, locked the theme's text colour.
+- All file systems of FS-1 (2026-11-17, version 2026.11.17k). Test volumes made from
+  copies of `throwaway-ntfs` (unlocked with `cryptsetup`, inside reformatted with
+  `mkfs.ext4`, `mkfs.btrfs --mixed`, `mkfs.vfat -F 32`; the VeraCrypt header and
+  password unchanged) and a 400 MB volume for XFS (`mkfs.xfs` needs about 300 MB; label
+  at most 12 characters). `scripts/fstest.sh` on each: write a file, dismount, mount
+  read-only (options show `ro`, the file is readable, writing is refused), mount
+  normally, remove the file. Passed for ext4, Btrfs, FAT32 (saved volumes, shared) and
+  XFS (as "mount once"). Owners as designed: `root:root` on ext4, Btrfs and XFS,
+  `nobody:users` on FAT32. Afterwards the password was found in no log, and the "mount
+  once" name in no log line. Found and fixed: FAT32 was mounted with the kernel's old
+  `iso8859-1` character set; it now gets `utf8`.
+- Top folder and SMB writes (FS-6, 2026-11-17, version 2026.11.17l). Before: writing
+  over SMB worked on FAT32 and NTFS but failed on ext4, Btrfs and XFS (top folder
+  `root:root 0755`). Remounting `throwaway-ext4` asked the question, "Set it" let
+  Windows write to the share; on `throwaway-btrfs` "Let the share write" in the
+  information window changed the folder to `nobody:users, 0777` and Windows could
+  write; "Fix permissions…" asked first and ran. Passed.
 
 **Engine tests (2026-11-15, all passed, on `throwaway-ntfs`, run with
 `scripts/enginetest.sh`).**

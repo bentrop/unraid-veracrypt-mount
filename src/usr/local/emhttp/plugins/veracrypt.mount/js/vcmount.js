@@ -416,6 +416,16 @@
                         infoRow('Options', a.filesystem.options ? '<code>' + esc(a.filesystem.options) + '</code>' : null);
             }
             html += infoRow('Mounted at', v.mounted_at ? esc(v.mounted_at) : null);
+            if (a.top_folder) {
+                var actions = '';
+                if (a.top_folder.owners && v.state === 'mounted' && !v.read_only) {
+                    if (!a.top_folder.share_can_write) {
+                        actions += ' <a href="#" class="vcm-fix-top" data-name="' + esc(v.name) + '">Let the share write</a>';
+                    }
+                    actions += ' <a href="#" class="vcm-fix-perms" data-name="' + esc(v.name) + '">Fix permissions…</a>';
+                }
+                html += infoRow('Top folder', esc(a.top_folder.owner) + ', ' + esc(a.top_folder.mode) + actions);
+            }
             if (v.state === 'mounted' && v.size_bytes > 0) {
                 html += infoRow('Usage', size(v.size_bytes - v.free_bytes) + ' used, ' + size(v.free_bytes) + ' free of ' + size(v.size_bytes));
             }
@@ -441,6 +451,26 @@
                 $('#vcm-info-close').on('click', function () { box.prop('hidden', true); });
                 $(document).on('keydown', function (e) { if (e.key === 'Escape') { box.prop('hidden', true); } });
             }
+            $('#vcm-info-body').off('click').on('click', '.vcm-fix-top', function (e) {
+                e.preventDefault();
+                act({ action: 'fix-top', name: $(this).attr('data-name') }).then(function (f) {
+                    if (f.ok) { showInfo(name); } else { message('Could not change the top folder', esc(f.error), 'error'); }
+                });
+            }).on('click', '.vcm-fix-perms', function (e) {
+                e.preventDefault();
+                var target = $(this).attr('data-name');
+                swal({
+                    title: 'Fix permissions of ' + esc(v.display_name) + '?',
+                    text: 'Everything inside the volume will belong to nobody:users, with folders writable for all and ' +
+                          'files readable and writable for all, as Unraid\'s "New Permissions" tool does. ' +
+                          'This can break containers that need their own owners, such as databases. It cannot be undone.',
+                    type: 'warning', html: true, showCancelButton: true, confirmButtonText: 'Fix permissions', closeOnConfirm: false
+                }, function () {
+                    act({ action: 'fix-permissions', name: target }).then(function (f) {
+                        message(f.ok ? 'Started' : 'Could not start', esc(f.ok ? f.message : f.error), f.ok ? 'success' : 'error');
+                    });
+                });
+            });
             $('#vcm-info-title').text(v.display_name);
             $('#vcm-info-body').html(html);
             box.prop('hidden', false);
@@ -567,7 +597,35 @@
         });
         if (notes.length) { message('Mounted, with problems', notes.join('<br>'), 'warning'); }
         refresh();
-        if (inQueue) { nextInQueue(); }
+        var next = function () { if (inQueue) { nextInQueue(); } };
+        if (a.top_folder_blocked && !notes.length) { askTopFolder(a.volume, next); } else { next(); }
+    }
+
+    /**
+     * After mounting an ext4, XFS or Btrfs volume whose share gives someone
+     * write access: its top folder belongs to another user, so the share
+     * (which writes as nobody:users) cannot write. Ask before changing it; the
+     * mount never changes permissions by itself.
+     */
+    function askTopFolder(v, done) {
+        var writers = Object.keys((v.share && v.share.users) || {}).filter(function (u) {
+            return v.share.users[u] === 'read-write';
+        });
+        var path = '\\\\' + window.location.hostname.toUpperCase() + '\\' + v.name;
+        swal({
+            title: 'Allow writing over the network?',
+            text: 'The share ' + esc(path) + ' gives ' + esc(writers.join(', ')) + ' write access, but the top folder of ' +
+                  esc(v.display_name) + ' belongs to another user, so the share cannot write to it.<br><br>' +
+                  'Set the top folder to owner nobody:users and make it writable? Nothing inside the volume is changed.',
+            type: 'info', html: true, showCancelButton: true,
+            confirmButtonText: 'Set it', cancelButtonText: 'Not now', closeOnConfirm: false
+        }, function (yes) {
+            if (!yes) { done(); return; }
+            act({ action: 'fix-top', name: v.name }).then(function (f) {
+                if (f.ok) { swal.close(); } else { message('Could not change the top folder', esc(f.error), 'error'); }
+                done();
+            });
+        });
     }
 
     /**

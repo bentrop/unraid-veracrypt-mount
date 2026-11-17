@@ -96,6 +96,10 @@ Usage:
   vcmount busy                               say whether another vcmount action is running
   vcmount info <name>                        details of one volume: file, encryption,
                                              filesystem, share, dependents, recent log
+  vcmount fix-top <name>                     make the top folder of a mounted ext4, XFS or
+                                             Btrfs volume writable for its network share
+  vcmount fix-permissions <name>             set everything inside a mounted volume to
+                                             nobody:users, as Unraid's New Permissions
   vcmount privacy                            check activity-logging plugins (PRIV-3): the
                                              exclusion line File Activity needs, if any
   vcmount config                             show the saved settings and their revision
@@ -1147,12 +1151,16 @@ function do_mount(string $name, string $file, string $point, bool $read_only): v
     // Which filesystem is inside?
     $r = run([program('blkid'), '-o', 'value', '-s', 'TYPE', $device], TOOL_TIMEOUT);
     $found = trim($r['out']);
-    $drivers = ['ntfs' => 'ntfs3', 'exfat' => 'exfat'];
+    // FS-1: every file system both VeraCrypt and Unraid support. ext2 and ext3
+    // are mounted with the ext4 driver, which reads them.
+    $drivers = ['ntfs' => 'ntfs3', 'exfat' => 'exfat', 'vfat' => 'vfat',
+                'ext2' => 'ext4', 'ext3' => 'ext4', 'ext4' => 'ext4', 'xfs' => 'xfs', 'btrfs' => 'btrfs'];
     if (!isset($drivers[$found])) {
         $locked = lock_again($mapper);
         throw new Fail(
-            'The volume was unlocked, but it contains neither NTFS nor exFAT'
-            . ($found === '' ? '' : " (found: $found)") . '. '
+            'The volume was unlocked, but its file system is not one this plugin mounts'
+            . ($found === '' ? ' (none found)' : " (found: $found)")
+            . '. Supported: FAT32, exFAT, NTFS, ext2/3/4, XFS and Btrfs. '
             . ($locked ? 'It was locked again.' : 'It could NOT be locked again.'),
             CODE_FILESYSTEM
         );
@@ -1167,9 +1175,19 @@ function do_mount(string $name, string $file, string $point, bool $read_only): v
         }
         $created = true;
     }
-    $options = 'nosuid,nodev,uid=99,gid=100';
+    $options = 'nosuid,nodev';
+    // FS-4: FAT32, exFAT and NTFS store no owners, so every file appears as
+    // nobody:users, Unraid's convention. ext4, XFS and Btrfs keep their own.
+    if (in_array($found, ['ntfs', 'exfat', 'vfat'], true)) {
+        $options .= ',uid=99,gid=100';
+    }
     if ($found === 'ntfs') {
-        $options .= ',windows_names';
+        $options .= ',windows_names';   // FS-3
+    }
+    if ($found === 'vfat') {
+        // Without it the kernel uses iso8859-1, and names with characters
+        // outside Western European ones (emoji, Asian scripts) come out wrong.
+        $options .= ',utf8';
     }
     if ($read_only) {
         $options .= ',ro';
@@ -1183,7 +1201,15 @@ function do_mount(string $name, string $file, string $point, bool $read_only): v
         throw new Fail(
             "The volume was unlocked, but its filesystem could not be mounted.\n"
             . trim($r['err']) . "\n"
-            . "If the volume was not closed cleanly: mount it in VeraCrypt on Windows, run a disk check (chkdsk), then try again.\n"
+            . 'If the volume was not closed cleanly, check its file system first: '
+            . ([
+                'ntfs' => 'mount it in VeraCrypt on Windows and run a disk check (chkdsk).',
+                'exfat' => 'mount it in VeraCrypt on Windows and run a disk check (chkdsk).',
+                'vfat' => 'mount it in VeraCrypt on Windows and run a disk check (chkdsk).',
+                'xfs' => 'run xfs_repair on the unlocked volume; if it was mounted read-only, mount it once read-write so its journal can be replayed.',
+                'btrfs' => 'run btrfs check on the unlocked volume; if it was mounted read-only, mount it once read-write.',
+            ][$found] ?? 'run fsck on the unlocked volume; if it was mounted read-only, mount it once read-write so its journal can be replayed.')
+            . "\n"
             . ($locked ? 'The volume was locked again.' : 'The volume could NOT be locked again.'),
             CODE_FILESYSTEM
         );
@@ -1274,7 +1300,8 @@ function command_mount(array $args, array $options, bool $json): int
     if ($json) {
         $v = describe($name, $saved ? $volume : null, live_volumes()[$name] ?? null);
         echo json_encode(
-            ['ok' => true, 'code' => $code, 'volume' => $v, 'share_error' => $share_error, 'failed_dependents' => $failed],
+            ['ok' => true, 'code' => $code, 'volume' => $v, 'share_error' => $share_error, 'failed_dependents' => $failed,
+             'top_folder_blocked' => $share_error === null && top_folder_blocked($name, $saved ? $volume : null)],
             JSON_UNESCAPED_SLASHES
         ), "\n";
         return $code;
@@ -1287,6 +1314,10 @@ function command_mount(array $args, array $options, bool $json): int
     }
     foreach ($failed as $f) {
         fwrite(STDERR, "Dependent \"{$f['container']}\" could not be started: {$f['reason']}\n");
+    }
+    if ($share_error === null && top_folder_blocked($name, $saved ? $volume : null)) {
+        echo "Note: the share cannot write yet, because the volume's top folder belongs to another user.\n",
+             "To let it, run: vcmount fix-top $name   (only the top folder is changed)\n";
     }
     return $code;
 }
@@ -1942,6 +1973,109 @@ function command_busy(array $args, bool $json): int
     return CODE_OK;
 }
 
+/** File systems with real owners, where a share may be blocked by the top folder. */
+const OWNER_FILESYSTEMS = ['ext2', 'ext3', 'ext4', 'xfs', 'btrfs'];
+const SHARE_UID = 99;    // nobody, as which the plugin's shares write (force user)
+const SHARE_GID = 100;   // users
+
+/** Can the share's user (nobody:users) create files in this folder? */
+function share_can_write(string $dir): bool
+{
+    $st = @stat($dir);
+    if ($st === false) {
+        return false;
+    }
+    $mode = $st['mode'];
+    return ($st['uid'] === SHARE_UID && ($mode & 0300) === 0300)
+        || ($st['gid'] === SHARE_GID && ($mode & 0030) === 0030)
+        || ($mode & 0003) === 0003;
+}
+
+/**
+ * Is the network share of a mounted volume blocked by its top folder? Only for
+ * a saved volume with a share that gives someone write access, mounted
+ * read-write, with a file system that has owners (ext4, XFS, Btrfs). The page
+ * then asks whether to change the folder (fix-top); the mount never does.
+ */
+function top_folder_blocked(string $name, ?array $saved): bool
+{
+    $live = live_volumes()[$name] ?? null;
+    if ($saved === null || $live === null || $live['mounted_at'] === null || $live['read_only']) {
+        return false;
+    }
+    if (!in_array($live['filesystem'] ?? '', OWNER_FILESYSTEMS, true)) {
+        return false;
+    }
+    $writers = array_filter($saved['share']['users'] ?? [], fn($a) => $a === 'read-write');
+    return $writers !== [] && !share_can_write($live['mounted_at']);
+}
+
+/** The mount point of a volume mounted read-write with a file system that has owners. */
+function owner_fs_point(string $name, bool $any_fs = false): string
+{
+    if (!preg_match(NAME_PATTERN, $name)) {
+        throw new Fail('That is not a valid volume name.', CODE_USAGE);
+    }
+    $live = live_volumes()[$name] ?? null;
+    if ($live === null || $live['mounted_at'] === null) {
+        throw new Fail("\"$name\" is not mounted.", CODE_USAGE);
+    }
+    if ($live['read_only']) {
+        throw new Fail("\"$name\" is mounted read-only. Mount it read-write first.", CODE_REFUSED);
+    }
+    if (!$any_fs && !in_array($live['filesystem'] ?? '', OWNER_FILESYSTEMS, true)) {
+        throw new Fail("\"$name\" has no owners to change ({$live['filesystem']}): every file already appears as nobody:users.", CODE_REFUSED);
+    }
+    return $live['mounted_at'];
+}
+
+/**
+ * Make only the top folder of a mounted ext4, XFS or Btrfs volume belong to
+ * nobody:users and writable for all, as Unraid keeps its share folders, so the
+ * volume's network share can write to it. Nothing inside is changed. Run only
+ * when the user asked for it (the page's question after mounting).
+ */
+function command_fix_top(array $args, bool $json): int
+{
+    if (count($args) !== 1) {
+        throw new Fail('Usage: vcmount fix-top <name>', CODE_USAGE);
+    }
+    $point = owner_fs_point($args[0]);
+    $lock = take_lock();
+    if (!@chown($point, SHARE_UID) || !@chgrp($point, SHARE_GID) || !@chmod($point, 0777)) {
+        throw new Fail("Could not change the top folder $point.", CODE_USAGE);
+    }
+    $message = "The top folder of \"{$args[0]}\" now belongs to nobody:users and is writable for its network share.";
+    echo $json ? json_encode(['ok' => true, 'message' => $message], JSON_UNESCAPED_SLASHES) . "\n" : "$message\n";
+    return CODE_OK;
+}
+
+/**
+ * Set everything inside a mounted volume to nobody:users, folders writable for
+ * all and files readable and writable for all: Unraid's own New Permissions
+ * tool (/usr/local/sbin/newperms). It can run for a long time on a large
+ * volume, so it is started in the background and this command returns at once.
+ * The page asks for confirmation first: it can break containers that need
+ * their own owners.
+ */
+function command_fix_permissions(array $args, bool $json): int
+{
+    if (count($args) !== 1) {
+        throw new Fail('Usage: vcmount fix-permissions <name>', CODE_USAGE);
+    }
+    $point = owner_fs_point($args[0]);
+    $tool = '/usr/local/sbin/newperms';
+    if (!is_executable($tool)) {
+        throw new Fail("Unraid's permission tool $tool was not found.", CODE_USAGE);
+    }
+    // In the background, cut loose from this program's output: the folder is
+    // passed as an argument, never as part of a command line.
+    run([program('sh'), '-c', 'exec "$0" "$1" >/dev/null 2>&1 </dev/null &', $tool, $point], TOOL_TIMEOUT);
+    $message = "Setting everything inside \"{$args[0]}\" to nobody:users has started. On a large volume this can take a while.";
+    echo $json ? json_encode(['ok' => true, 'message' => $message], JSON_UNESCAPED_SLASHES) . "\n" : "$message\n";
+    return CODE_OK;
+}
+
 /** The plugin's log lines in the system log, newest last, that mention one volume. */
 const SYSLOG = '/var/log/syslog';
 const INFO_LOG_LINES = 15;
@@ -2032,6 +2166,14 @@ function command_info(array $args, bool $json): int
             }
         }
         $info['filesystem'] = $fs ?: null;
+        if ($v['mounted_at'] !== null && ($st = @stat($v['mounted_at'])) !== false) {
+            $posix = function_exists('posix_getpwuid');   // the names, if PHP's posix module is there
+            $owner = ($posix ? (posix_getpwuid($st['uid'])['name'] ?? null) : null) ?? (string) $st['uid'];
+            $group = ($posix ? (posix_getgrgid($st['gid'])['name'] ?? null) : null) ?? (string) $st['gid'];
+            $info['top_folder'] = ['owner' => "$owner:$group", 'mode' => sprintf('%04o', $st['mode'] & 07777),
+                                   'share_can_write' => share_can_write($v['mounted_at']),
+                                   'owners' => in_array($live['filesystem'] ?? '', OWNER_FILESYSTEMS, true)];
+        }
     }
 
     if ($saved !== null) {
@@ -2283,6 +2425,10 @@ function main(array $argv): int
                 return command_privacy($args, $json);
             case 'info':
                 return command_info($args, $json);
+            case 'fix-top':
+                return command_fix_top($args, $json);
+            case 'fix-permissions':
+                return command_fix_permissions($args, $json);
             case 'config':
                 return command_config($args, $json);
             case 'save-config':

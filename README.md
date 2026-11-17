@@ -42,12 +42,20 @@ Windows, just not on both at once.
 ## Requirements and limits
 
 - Unraid **7.4** or newer.
-- VeraCrypt volumes with **NTFS** or **exFAT** inside, opened with a **password**.
+- VeraCrypt volumes opened with a **password**, with **FAT32, exFAT, NTFS, ext2/3/4,
+  XFS or Btrfs** inside. FAT32, exFAT and NTFS also open in VeraCrypt on Windows; ext4,
+  XFS and Btrfs keep Unix owners and permissions, which containers need, but open only
+  on Linux. (VeraCrypt on Windows creates only the first three; for the others, create
+  the volume with VeraCrypt on Linux.)
 - Not built yet: keyfiles, PIM, hidden volumes, mounting automatically at array start,
   and Docker Compose stacks as dependents.
-- NTFS and exFAT have no Unix file permissions, so some containers (databases
-  especially) will not run from them. exFAT has no journal and is the more fragile
+- FAT32, exFAT and NTFS have no Unix file permissions, so some containers (databases
+  especially) will not run from them; use ext4, XFS or Btrfs for those. exFAT has no journal and is the more fragile
   choice after a power cut.
+- On ext4, XFS and Btrfs a new volume's top folder belongs to `root`, so its share
+  cannot write at first. After mounting, the page asks whether to let the share write
+  (only the top folder is changed); the volume's information window offers the same,
+  plus **Fix permissions…** for everything inside (Unraid's New Permissions).
 - Volumes cannot be created or their passwords changed here; use VeraCrypt for that.
 - By default a volume is mounted at `/mnt/addons/<name>`, outside your shares.
   Mounting it into a folder of a share is possible, but then everything that walks
