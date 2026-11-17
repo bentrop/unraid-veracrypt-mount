@@ -21,23 +21,40 @@ $vcm = '/plugins/veracrypt.mount';
 </div>
 
 <form id="vcs-form" autocomplete="off" onsubmit="return false">
+  <!-- One list per setting, each followed by its help text: Unraid's help toggle
+       (the "?" at the top) shows a blockquote.inline_help under the last setting
+       of the list just before it, and makes that setting's name clickable
+       (BodyInlineJS.php). -->
   <dl class="vcm-form">
     <dt>Force a dismount when the array stops</dt>
-    <dd><select id="s-force"><option value="yes">Yes</option><option value="no">No</option></select>
-        <span class="vcm-note">Yes: a volume that is still in use when the array stops or the server shuts
-          down is dismounted anyway, after its dependents were stopped. No: the array waits until the
-          volume is free.</span></dd>
+    <dd><select id="s-force"><option value="yes">Yes</option><option value="no">No</option></select></dd>
+  </dl>
+  <blockquote class="inline_help">
+    <p>Yes: a volume that is still in use when the array stops or the server shuts down is
+       dismounted anyway, after its dependents were stopped. No: the array waits until the
+       volume is free.</p>
+  </blockquote>
+
+  <dl class="vcm-form">
     <dt>Require HTTPS to mount</dt>
     <dd><select id="s-https"><option value="no">No</option><option value="yes">Yes</option></select>
-        <span class="vcm-note">Yes: a password is accepted only from a page opened over HTTPS. Over plain
-          HTTP it would travel unencrypted over your network. Unlocking over SSH always works.</span>
         <p class="vcm-warning" id="s-https-warning" style="display:none">You are on plain HTTP right now.
           With this on, you cannot mount from this page until you open it over HTTPS.</p></dd>
-    <dt>Show the volumes on the Main page</dt>
-    <dd><select id="s-main"><option value="no">No</option><option value="yes">Yes</option></select>
-        <span class="vcm-note">Yes: the Main page gets a section with the volumes and their Mount and
-          Dismount buttons.</span></dd>
   </dl>
+  <blockquote class="inline_help">
+    <p>Yes: a password is accepted only from a page opened over HTTPS; over plain HTTP the
+       page offers no password field. Over plain HTTP the password would travel unencrypted
+       over your network. Unlocking over SSH with <code>vcmount</code> always works.</p>
+  </blockquote>
+
+  <dl class="vcm-form">
+    <dt>Show the volumes on the Main page</dt>
+    <dd><select id="s-main"><option value="no">No</option><option value="yes">Yes</option></select></dd>
+  </dl>
+  <blockquote class="inline_help">
+    <p>Yes: the Main page gets a section with the volumes, their locks to mount and dismount,
+       and a link to open a mounted volume in the file manager.</p>
+  </blockquote>
 
   <p id="vcs-error" class="vcm-error" hidden></p>
   <div class="vcm-buttons">

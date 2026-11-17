@@ -149,7 +149,7 @@
                 var percent = Math.round(100 * (v.size_bytes - v.free_bytes) / v.size_bytes);
                 usage = '<span class="load">' + percent + '%</span>' +
                         '<div class="usage-disk sys" title="' + size(v.free_bytes) + ' free of ' + size(v.size_bytes) + '">' +
-                        '<span style="width:' + percent + '%"></span><span></span></div>';
+                        '<span class="' + barClass(percent, false) + '" style="width:' + percent + '%"></span><span></span></div>';
             }
             return '<tr class="vcm-row"><td>' +
                    '<span class="vcm-col-name">' + lock + ' ' + label + '</span>' +
@@ -158,6 +158,28 @@
                    '<span class="w18">' + usage + '</span>' +
                    '</td></tr>';
         }).join(''));
+    }
+
+    /**
+     * The colour class of a usage bar, as Unraid's usage_color() picks it
+     * (dynamix/include/Helpers.php): none when the display settings show bars
+     * without colour, otherwise green, orange from the warning level and red from
+     * the critical level. For a bar of free space the levels count from the top.
+     */
+    function barClass(percent, free) {
+        var d = $('#vcm-display');
+        var text = parseInt(d.attr('data-text'), 10) || 0;
+        if (text === 1 || Math.floor(text / 10) === 1) { return ''; }
+        var warning = parseInt(d.attr('data-warning'), 10) || 0;
+        var critical = parseInt(d.attr('data-critical'), 10) || 0;
+        if (free) {
+            if (critical > 0 && percent <= 100 - critical) { return 'redbar'; }
+            if (warning > 0 && percent <= 100 - warning) { return 'orangebar'; }
+            return 'greenbar';
+        }
+        if (critical > 0 && percent >= critical) { return 'redbar'; }
+        if (warning > 0 && percent >= warning) { return 'orangebar'; }
+        return 'greenbar';
     }
 
     /** A link to Unraid's file manager for a folder, written as the Main page writes it. */
@@ -213,9 +235,9 @@
         if (known) {
             var usedPart = Math.round(100 * (v.size_bytes - v.free_bytes) / v.size_bytes);
             sizes = '<td>' + size(v.size_bytes) + '</td>' +
-                    '<td><div class="usage-disk"><span style="width:' + usedPart + '%"></span>' +
+                    '<td><div class="usage-disk"><span class="' + barClass(usedPart, false) + '" style="width:' + usedPart + '%"></span>' +
                     '<span>' + size(v.size_bytes - v.free_bytes) + '</span></div></td>' +
-                    '<td><div class="usage-disk"><span style="width:' + (100 - usedPart) + '%"></span>' +
+                    '<td><div class="usage-disk"><span class="' + barClass(100 - usedPart, true) + '" style="width:' + (100 - usedPart) + '%"></span>' +
                     '<span>' + size(v.free_bytes) + '</span></div></td>';
         }
         return '<tr>' +
@@ -230,7 +252,7 @@
     /** Two lines in one cell: the main fact, and the details in small grey text. */
     function twoLines(first, second, title, open) {
         return '<div class="vcm-l1' + (open ? ' vcm-open' : '') + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + first + '</div>' +
-               '<div class="vcm-l2">' + second + '</div>';
+               (second ? '<div class="vcm-l2">' + second + '</div>' : '');   // no second line that only says "nothing"
     }
 
     /** The Share cell of the Volumes tab: state above, address and users below. */
@@ -258,17 +280,17 @@
             return twoLines('<i class="fa fa-fw fa-folder-o"></i> via ' + esc(inside),
                             'inside the Unraid share "' + esc(inside) + '"');
         }
-        return twoLines('<span class="vcm-dim">-</span>', 'not shared');
+        return twoLines('<span class="vcm-dim">-</span>', '');
     }
 
     /** The Usage cell of the Volumes tab: one bar above, free space and filesystem below. */
     function usageCell(v) {
         if (v.state === 'mounted' && v.size_bytes > 0) {
             var used = Math.round(100 * (v.size_bytes - v.free_bytes) / v.size_bytes);
-            return twoLines('<span class="vcm-bar"><span style="width:' + used + '%"></span></span>' + used + '%',
+            return twoLines('<span class="vcm-bar"><span class="' + barClass(used, false) + '" style="width:' + used + '%"></span></span>' + used + '%',
                             size(v.free_bytes) + ' free of ' + size(v.size_bytes) + (v.filesystem ? ' · ' + esc(v.filesystem) : ''));
         }
-        return twoLines('<span class="vcm-dim">-</span>', v.state === 'unlocked' ? 'unlocked, not mounted' : 'locked');
+        return twoLines('<span class="vcm-dim">-</span>', v.state === 'unlocked' ? 'unlocked, not mounted' : '');
     }
 
     /**
@@ -305,7 +327,7 @@
             '<td>' + (deps.length
                 ? twoLines(deps.length + (deps.length === 1 ? ' container' : ' containers'), esc(deps.join(', ')),
                            'Started in this order, stopped in reverse: ' + deps.join(', '))
-                : twoLines('<span class="vcm-dim">-</span>', 'none')) + '</td>' +
+                : twoLines('<span class="vcm-dim">-</span>', '')) + '</td>' +
             '<td>' + usageCell(v) + '</td>' +
             '<td class="vcm-actions">' + buttons + '</td>' +
             '</tr>';

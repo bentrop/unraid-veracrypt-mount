@@ -4,7 +4,15 @@
  * is one password form to maintain and review. Markup only: js/vcmount.js
  * gives it its behaviour.
  */
+
+// Unraid's display settings for usage bars (Settings > Display Settings), for the
+// script to colour bars exactly as Unraid's usage_color() does (Helpers.php).
+$vcm_display = $GLOBALS['display'] ?? [];
 ?>
+<div id="vcm-display" hidden
+     data-text="<?= (int) ($vcm_display['text'] ?? 0) ?>"
+     data-warning="<?= (int) ($vcm_display['warning'] ?? 0) ?>"
+     data-critical="<?= (int) ($vcm_display['critical'] ?? 0) ?>"></div>
 <!-- The mount dialog. A real form with a real password field, so a password
      manager can fill it (UI-4). The hidden user name field holds the volume
      name, so the manager keeps one entry per volume. -->

@@ -141,7 +141,9 @@ table.vcm-manage tbody td { padding-top: 6px; padding-bottom: 6px; }
 .vcm-l2 { font-size: .85em; opacity: .65; line-height: 1.4; }
 .vcm-bar { display: inline-block; width: 60%; max-width: 140px; height: 10px; margin-right: 8px; vertical-align: -1px;
            background: rgba(128, 128, 128, .25); }
-.vcm-bar > span { display: block; height: 100%; background: rgba(128, 128, 128, .8); }
+.vcm-bar > span { display: block; height: 100%; }
+/* Grey unless Unraid's colour classes (greenbar, orangebar, redbar) apply. */
+.vcm-bar > span:not(.greenbar):not(.orangebar):not(.redbar) { background: rgba(128, 128, 128, .8); }
 /* The buttons keep their width, so a long name never pushes them into two lines. */
 table.vcm-manage td.vcm-actions { white-space: nowrap; overflow: visible; }
 table.vcm-manage td.vcm-actions input[type=button] { width: calc(50% - 6px); min-width: 0; margin: 0 0 0 4px;

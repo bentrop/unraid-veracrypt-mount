@@ -604,6 +604,16 @@ call `include/actions.php` the way the web page will, without a browser.
   from `https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/veracrypt.mount.plg`:
   the `.plg` and the package were downloaded from GitHub and checked, the volume list
   was kept, and the Plugins page shows "up-to-date" in alphabetical order. Passed.
+- Polish (2026-11-17, version 2026.11.17g): the Settings tab's explanations use Unraid's
+  own help toggle (`blockquote.inline_help`, shown by the "?" or by clicking a
+  setting's name); usage bars are coloured by Unraid's own rule (`usage_color` in
+  `Helpers.php`: green, orange from the warning level, red from the critical level,
+  none when Display Settings turn colours off); the Volumes tab leaves out second
+  lines that only said "not shared", "none" or "locked". Checked by the owner on the
+  light and on the black theme; locks, banner, grey text and bars stay readable.
+  Passed. Kept on purpose: the lock colours that match each page (black on the
+  Dashboard, Unraid's link blue on the Main page and the Volumes tab), the plain-HTTP
+  banner, and the tile's column layout.
 
 **Engine tests (2026-11-15, all passed, on `throwaway-ntfs`, run with
 `scripts/enginetest.sh`).**
