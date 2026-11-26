@@ -524,14 +524,22 @@
         return overHttp && httpsRequired !== false;
     }
 
-    function openDialog(name) {
+    /**
+     * Over plain HTTP, ask the server for "Require HTTPS" now: the setting may
+     * have changed on the Settings tab or in another browser tab since this
+     * page last read it. Unknown counts as required.
+     */
+    function freshHttpsSetting(next) {
+        act({ action: 'list' }).then(function (a) {
+            httpsRequired = a.ok && a.settings ? !!a.settings.require_https : true;
+            next();
+        });
+    }
+
+    function openDialog(name, checked) {
         busyWatch++;
-        // Over plain HTTP the setting must be known first; until then, ask for it.
-        if (overHttp && httpsRequired === null) {
-            act({ action: 'list' }).then(function (a) {
-                httpsRequired = a.ok && a.settings ? !!a.settings.require_https : true;
-                openDialog(name);
-            });
+        if (overHttp && !checked) {
+            freshHttpsSetting(function () { openDialog(name, true); });
             return;
         }
         var blocked = passwordBlocked();
@@ -545,10 +553,18 @@
         var v = null;
         lastVolumes.forEach(function (x) { if (x.name === name) { v = x; } });
         var keyfiles = (v && v.keyfiles) || [];
-        $('#vcm-pim').val('').attr('placeholder', once ? 'only if the volume has one' : '');
-        $('#vcm-pim-label').prop('hidden', blocked || !(once || (v && v.pim)));
-        $('#vcm-keyfile, #vcm-name, #vcm-file').val('');
-        $('#vcm-hidden, #vcm-read-only').prop('checked', false);
+        // Extras: for "Mount a file once" four boxes, each showing its field
+        // when ticked; for a saved volume only its PIM field, if it has one.
+        $('#vcm-name, #vcm-file').val('');
+        $('#vcm-hidden, #vcm-read-only, #vcm-use-pim, #vcm-use-keyfiles').prop('checked', false);
+        $('#vcm-opts .vcm-once-only').prop('hidden', !once);
+        $('#vcm-opts .vcm-saved-only').prop('hidden', once);
+        $('#vcm-keyfiles-box').prop('hidden', true);
+        $('#vcm-keyfiles').empty();
+        if (once) { addKeyfileRow('', '#vcm-keyfiles'); }
+        $('#vcm-pim').val('').prop('hidden', once);
+        $('#vcm-opts').prop('hidden', blocked || !(once || (v && v.pim)));
+        $('#vcm-once-note').prop('hidden', !once || blocked);
         $('#vcm-keyfile-note').prop('hidden', blocked || !keyfiles.length)
             .text((keyfiles.length > 1 ? 'Keyfiles: ' : 'Keyfile: ') + keyfiles.join(', ') +
                   '. Leave the password empty if the volume has none.' +
@@ -557,7 +573,8 @@
         $('#vcm-dialog-http').prop('hidden', !overHttp || blocked);
         $('#vcm-dialog-https').prop('hidden', !blocked);
         $('#vcm-https-link').attr('href', 'https://' + window.location.host + window.location.pathname + window.location.search);
-        $('#vcm-password-label, #vcm-mount-submit').toggle(!blocked);
+        $('#vcm-password-label').prop('hidden', blocked);
+        $('#vcm-mount-submit').toggle(!blocked);
         $('#vcm-once-fields').prop('hidden', !once || blocked);
         $('#vcm-password').prop('disabled', blocked);
         $('#vcm-skip').prop('hidden', !inQueue);
@@ -796,9 +813,28 @@
         }());
     }
 
+    var httpChecked = false;   // the setting was asked for right before this send
+
     function submitMount(event) {
-        event.preventDefault();
+        if (event) { event.preventDefault(); }
         if (mounting || passwordBlocked()) { return; }   // never send a password the setting forbids
+        // Over plain HTTP, ask once more right before the password leaves the
+        // browser; if the setting is on now, show the HTTPS notice instead.
+        if (overHttp && !httpChecked) {
+            mounting = true;
+            freshHttpsSetting(function () {
+                mounting = false;
+                if (passwordBlocked()) {
+                    $('#vcm-password, #vcm-pim').val('');
+                    openDialog(mountTarget, true);
+                    return;
+                }
+                httpChecked = true;
+                submitMount(null);
+            });
+            return;
+        }
+        httpChecked = false;
         var once = mountTarget === null;
         var field = $('#vcm-password');
         var pimField = $('#vcm-pim');
@@ -810,14 +846,22 @@
             data.file = $.trim($('#vcm-file').val());
             data.read_only = $('#vcm-read-only').is(':checked') ? '1' : '0';
             data.hidden = $('#vcm-hidden').is(':checked') ? '1' : '0';
-            var k = $.trim($('#vcm-keyfile').val());
-            if (k) { data.keyfiles = [k]; keyfile = true; }
+            if ($('#vcm-use-keyfiles').is(':checked')) {
+                var ks = keyfilePaths('#vcm-keyfiles');
+                if (!ks.length) { dialogError('Choose a keyfile, or untick "Use keyfiles".'); return; }
+                if (ks.some(function (k) { return k.indexOf('/mnt/') !== 0; })) { dialogError('A keyfile must be a file under /mnt/.'); return; }
+                data.keyfiles = ks;
+                keyfile = true;
+            }
         } else {
             keyfile = !!(v && v.keyfiles && v.keyfiles.length);
         }
-        var pim = $.trim(pimField.val());
+        // The PIM counts only where it is asked for: its box for "Mount a file
+        // once", the volume's setting otherwise.
+        var needsPim = once ? $('#vcm-use-pim').is(':checked') : !!(v && v.pim);
+        var pim = needsPim ? $.trim(pimField.val()) : '';
         if (field.val() === '' && !keyfile) { dialogError('Enter the password.'); field.trigger('focus'); return; }
-        if (!once && v && v.pim && pim === '') { dialogError('Enter the PIM.'); pimField.trigger('focus'); return; }
+        if (needsPim && pim === '') { dialogError('Enter the PIM.'); pimField.trigger('focus'); return; }
         if (pim !== '' && !/^[1-9][0-9]{0,8}$/.test(pim)) {
             dialogError('The PIM must be a whole number from 1 upwards, without spaces.');
             pimField.trigger('focus');
@@ -998,24 +1042,29 @@
 
     var MAX_KEYFILES = 8;   // as the engine
 
+    // Keyfile lists: '#e-keyfiles' in the edit panel, '#vcm-keyfiles' in the
+    // "Mount a file once" dialog. Each is followed by its "Add another" link.
+
     /** One keyfile field with Unraid's file picker and a remove link. */
-    function addKeyfileRow(path) {
+    function addKeyfileRow(path, list) {
+        list = list || '#e-keyfiles';
         var row = $('<div class="vcm-keyfile"><input type="text" class="e-keyfile" spellcheck="false" '
             + 'autocomplete="off" placeholder="/mnt/..." data-pickroot="/mnt/" data-pickcloseonfile="true">'
             + '<a href="#" class="vcm-keyfile-remove" title="Remove this keyfile">&#10005;</a>'
             + '<span class="vcm-note" hidden>Already listed above; counts once.</span></div>');
         row.find('input').val(path || '');
-        $('#e-keyfiles').append(row);
+        $(list).append(row);
         if ($.fn.fileTreeAttach) { row.find('input').fileTreeAttach(); }
-        keyfileRows();
+        keyfileRows(list);
         return row;
     }
 
     /** One field needs no remove link; the add link stops at the limit. */
-    function keyfileRows() {
-        var rows = $('#e-keyfiles .vcm-keyfile');
+    function keyfileRows(list) {
+        list = list || '#e-keyfiles';
+        var rows = $(list).find('.vcm-keyfile');
         rows.find('.vcm-keyfile-remove').prop('hidden', rows.length < 2);
-        $('#e-keyfile-add').prop('hidden', rows.length >= MAX_KEYFILES);
+        $(list).siblings('a').prop('hidden', rows.length >= MAX_KEYFILES);
         // A repeated path is saved once; say so under the repeat.
         var seen = [];
         rows.each(function () {
@@ -1026,9 +1075,9 @@
     }
 
     /** The filled-in keyfile paths, without empty fields or repeats. */
-    function keyfilePaths() {
+    function keyfilePaths(list) {
         var paths = [];
-        $('#e-keyfiles .e-keyfile').each(function () {
+        $(list || '#e-keyfiles').find('.e-keyfile').each(function () {
             var p = $.trim($(this).val());
             if (p && paths.indexOf(p) < 0) { paths.push(p); }
         });
@@ -1400,20 +1449,32 @@
             markDirty();
             updateSummaries();
         });
-        // Keyfiles (KEY-2): another field, or one fewer.
-        $('#e-keyfile-add').on('click', function (e) {
+        // Keyfiles (KEY-2), in the edit panel and the dialog: another field, or one fewer.
+        $('#e-keyfile-add, #vcm-keyfile-add').on('click', function (e) {
             e.preventDefault();
+            var list = '#' + $(this).siblings('div').attr('id');
             // Use an empty field if there is one, rather than adding more.
-            var empty = $('#e-keyfiles .e-keyfile').filter(function () { return $.trim($(this).val()) === ''; });
-            (empty.length ? empty.first() : addKeyfileRow('').find('input')).trigger('focus');
+            var empty = $(list).find('.e-keyfile').filter(function () { return $.trim($(this).val()) === ''; });
+            (empty.length ? empty.first() : addKeyfileRow('', list).find('input')).trigger('focus');
         });
-        $('#e-keyfiles').on('input change', '.e-keyfile', keyfileRows);
-        $('#e-keyfiles').on('click', '.vcm-keyfile-remove', function (e) {
+        $('#e-keyfiles, #vcm-keyfiles').on('input change', '.e-keyfile', function () {
+            keyfileRows('#' + $(this).closest('#e-keyfiles, #vcm-keyfiles').attr('id'));
+        });
+        $('#e-keyfiles, #vcm-keyfiles').on('click', '.vcm-keyfile-remove', function (e) {
             e.preventDefault();
+            var list = '#' + $(this).closest('#e-keyfiles, #vcm-keyfiles').attr('id');
             $(this).closest('.vcm-keyfile').remove();
-            keyfileRows();
-            markDirty();
-            updateSummaries();
+            keyfileRows(list);
+            if (list === '#e-keyfiles') { markDirty(); updateSummaries(); }
+        });
+        // "Mount a file once": an extra appears when its box is ticked.
+        $('#vcm-use-pim').on('change', function () {
+            $('#vcm-pim').prop('hidden', !this.checked);
+            if (this.checked) { $('#vcm-pim').trigger('focus'); } else { $('#vcm-pim').val(''); }
+        });
+        $('#vcm-use-keyfiles').on('change', function () {
+            $('#vcm-keyfiles-box').prop('hidden', !this.checked);
+            if (this.checked) { $('#vcm-keyfiles .e-keyfile').first().trigger('focus'); }
         });
         $('#e-deps').on('click', '.vcm-dep-remove', function (e) {
             e.preventDefault();
@@ -1440,7 +1501,6 @@
             $('#e-file').fileTreeAttach();
             $('#e-mount-at').fileTreeAttach();
             $('#vcm-file').fileTreeAttach();   // "Mount a file once" (Volumes tab only)
-            $('#vcm-keyfile').fileTreeAttach();
         }
         // "Mount a file once": fill an empty name from the chosen file, as "Add volume" does.
         $('#vcm-file').on('input change', suggestOnceName);

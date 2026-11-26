@@ -23,26 +23,43 @@ $vcm_display = $GLOBALS['display'] ?? [];
   <form id="vcm-mount-form" class="vcm-box" autocomplete="on" method="post" action="about:blank" onsubmit="return false">
     <h3 id="vcm-mount-title">Mount</h3>
     <input type="text" id="vcm-user" name="username" autocomplete="username" class="vcm-offscreen" tabindex="-1" readonly>
-    <div id="vcm-once-fields" hidden>
-      <!-- VOL-5 leaves no trace, so the browser must not remember these either. -->
-      <!-- Not inside the label: Unraid's file picker puts its folder tree right
-           after the field, and clicks in a label's tree would reach the field. -->
-      <div class="vcm-field"><label for="vcm-file">Volume file</label>
-        <input type="text" id="vcm-file" placeholder="/mnt/user/..." spellcheck="false" autocomplete="off"
-               data-pickroot="/mnt/" data-pickcloseonfile="true"></div>
-      <label>Name <input type="text" id="vcm-name" maxlength="32" placeholder="letters, digits, - and _" spellcheck="false" autocomplete="off"></label>
-      <div class="vcm-field"><label for="vcm-keyfile">Keyfile <span class="vcm-note">(if the volume uses one)</span></label>
-        <input type="text" id="vcm-keyfile" placeholder="/mnt/..." spellcheck="false" autocomplete="off"
-               data-pickroot="/mnt/" data-pickcloseonfile="true"></div>
-      <label class="vcm-check"><input type="checkbox" id="vcm-read-only"> Read-only</label>
-      <label class="vcm-check"><input type="checkbox" id="vcm-hidden"> Open the hidden volume inside</label>
-      <p class="vcm-note">Nothing about this volume is saved or logged.</p>
+    <!-- Labels beside the fields; rows are display:contents, so hiding a row
+         hides its label and field together. -->
+    <div class="vcm-grid">
+      <div id="vcm-once-fields" class="vcm-row" hidden>
+        <!-- VOL-5 leaves no trace, so the browser must not remember these either.
+             The file picker puts its folder tree right after the field, so the
+             field is not inside its label. -->
+        <label for="vcm-file">Volume file</label>
+        <div><input type="text" id="vcm-file" placeholder="/mnt/user/..." spellcheck="false" autocomplete="off"
+                    data-pickroot="/mnt/" data-pickcloseonfile="true"></div>
+        <label for="vcm-name">Name</label>
+        <div><input type="text" id="vcm-name" maxlength="32" placeholder="letters, digits, - and _" spellcheck="false" autocomplete="off"></div>
+      </div>
+      <div id="vcm-password-label" class="vcm-row">
+        <label for="vcm-password">Password</label>
+        <div><input type="password" id="vcm-password" name="password" autocomplete="current-password"></div>
+      </div>
+      <!-- What else unlocking needs. For "Mount a file once" each extra is
+           switched on by its box; a saved volume shows only its PIM field. -->
+      <div id="vcm-opts" class="vcm-opts">
+        <!-- The PIM is sent with the password and goes the same way (SEC-1). -->
+        <div class="vcm-opt">
+          <label class="vcm-check vcm-once-only"><input type="checkbox" id="vcm-use-pim"> Use PIM</label>
+          <span class="vcm-saved-only">PIM</span>
+          <input type="password" id="vcm-pim" inputmode="numeric" maxlength="9" autocomplete="off" placeholder="PIM">
+        </div>
+        <label class="vcm-check vcm-once-only"><input type="checkbox" id="vcm-use-keyfiles"> Use keyfiles</label>
+        <div id="vcm-keyfiles-box" class="vcm-sub vcm-once-only">
+          <div id="vcm-keyfiles"></div>
+          <a href="#" id="vcm-keyfile-add"><i class="fa fa-fw fa-plus"></i> Add another keyfile</a>
+        </div>
+        <label class="vcm-check vcm-once-only"><input type="checkbox" id="vcm-read-only"> Read-only</label>
+        <label class="vcm-check vcm-once-only"><input type="checkbox" id="vcm-hidden"> Open the hidden volume inside</label>
+      </div>
     </div>
     <p id="vcm-keyfile-note" class="vcm-note" hidden></p>
-    <label id="vcm-password-label">Password <input type="password" id="vcm-password" name="password" autocomplete="current-password"></label>
-    <!-- The PIM is sent with the password and goes the same way (SEC-1). Shown
-         for a volume that asks for one, and always for "Mount a file once". -->
-    <label id="vcm-pim-label" hidden>PIM <input type="password" id="vcm-pim" inputmode="numeric" maxlength="9" autocomplete="off"></label>
+    <p id="vcm-once-note" class="vcm-note">Nothing about this volume is saved or logged.</p>
     <p id="vcm-dialog-http" class="vcm-warning" hidden>Plain HTTP: the password travels unencrypted.</p>
     <!-- Review P1: with "require HTTPS" on, a page opened over plain HTTP offers no
          password field at all, so the password cannot leave the browser. -->

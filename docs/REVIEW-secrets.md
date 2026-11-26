@@ -816,3 +816,18 @@ C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be docum
   `drwxr-xr-x`. 2 passed: after the cancels `/dev/mapper` held only `control`. 3 passed
   for Ctrl+C during the check; Ctrl+C at the password prompt itself was not tried.
   4 not done.
+
+## 10. Found in use: a stale "Require HTTPS" in the page (2026-11-27)
+
+- **Found by the owner, not by a review.** The Settings and Volumes tabs share one
+  browser page. After "Require HTTPS" was switched on and applied, the Volumes tab kept
+  its earlier copy of the setting, so over plain HTTP the mount dialog still offered the
+  password field. The server would have refused the mount (UI-5), but only after the
+  password had crossed the network unencrypted: a gap in P1.
+- **Fixed:** over plain HTTP the page asks the server for the setting each time the
+  mount dialog opens, and again right before the password is sent. If the setting is on
+  by then, nothing is sent, the password and PIM fields are emptied and the dialog shows
+  the HTTPS notice. An unknown setting counts as on.
+- **Tested on Bob** by the owner: switching the setting in either direction took effect
+  at once, for "Mount a file once" and for saved volumes.
+

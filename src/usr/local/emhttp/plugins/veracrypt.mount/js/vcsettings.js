@@ -80,9 +80,13 @@
     $(function () {
         $('#vcs-form').on('input change', function () { mark(true); warn(); });
         $('#vcs-apply').on('click', apply);
-        // Reset brings back the saved settings. Done leaves, as on Unraid's own pages.
+        // Reset brings back the saved settings. Done returns to the Volumes tab:
+        // Unraid's done() would leave the plugin for the Settings overview. Like
+        // done(), forget the remembered tab, then open this page again.
         $('#vcs-done').on('click', function () {
-            if (dirty) { load(); } else if (typeof done === 'function') { done(); }
+            if (dirty) { load(); return; }
+            if ($.removeCookie) { $.removeCookie('one'); }
+            location.replace(location.pathname);
         });
         load();
     });
