@@ -263,11 +263,18 @@ Nothing needs to be installed on the server.
   against the engine's limit of 3 minutes, with a short note on why unlocking is slow.
   A PIM above 2,000 (over four times VeraCrypt's default effort) is sent only after a
   warning and a second click; the warning does not show the PIM.
-- **UI-8 (Proposed, 2026-11-26)** Cancel ends a running unlock: the engine notes
-  cryptsetup's process number in `/var/run` while it checks the password, and a new
-  command `vcmount cancel-unlock` ends that process after checking it is a cryptsetup
-  unlock. Until then Cancel does nothing while unlocking. For after the next release,
-  with its own review.
+- **UI-8 (Agreed, 2026-11-26)** Cancel ends a running unlock. The page only asks:
+  `vcmount cancel-unlock` creates the marker `/var/run/vcmount.cancel`. The mount,
+  which waits for `cryptsetup` anyway, looks for it every half second and ends its own
+  child; no process number is passed around, so it cannot hit another program. The
+  marker is removed before and after every unlock. Cancel after the password was
+  accepted changes nothing: the mount completes. Ctrl+C, a closed terminal and a stop
+  signal (also the page's own time limit) are caught during the password check and end
+  cryptsetup the same way; otherwise it would run on alone, since it ignores them until
+  its key derivation ends. While the check runs, `/var/run/vcmount.unlocking` holds its
+  start time (no name, no path). A mount that finds the engine busy says at once what
+  is running and, for another unlock, offers to stop it, instead of waiting with its
+  own timer. Needs a short separate review (SEC-9).
 
 ### 5.8 Command-line tool
 
@@ -730,7 +737,16 @@ call `include/actions.php` the way the web page will, without a browser.
   limit did not stop it, the page's 5-minute limit ended the engine instead, and
   cryptsetup ran on alone (ended by hand with the owner's OK). Fixed: `run()` now ends a
   program 5 seconds after asking it to stop. Retried with the fix: about 4 minutes later
-  no cryptsetup was left on Bob. A search of `/var/log` and `/tmp` for 739184 found it nowhere.
+  no cryptsetup was left on Bob.
+- Cancel and busy (UI-8, 2026-11-26, Unraid 7.4.1, by the owner, PIM 739184 on
+  `throwaway-pim`): Cancel during the unlock answered "Unlocking was cancelled" within
+  a second, and the right PIM mounted straight after. A reload during an unlock, then
+  a new mount: at once "Another volume is still being unlocked (for m:ss; it stops by
+  itself within about m:ss)" with "Stop that unlock", which stopped it. (The first try
+  showed a generic message: a garbled constant name made `vcmount busy` fail silently,
+  which `php -l` does not catch; fixed.) Ctrl+C in Unraid's web terminal during
+  `vcmount mount --file ... --pim --keyfile ...`: "Unlocking was cancelled". Afterwards
+  no cryptsetup was left on Bob. Passed. A search of `/var/log` and `/tmp` for 739184 found it nowhere.
 
 **Engine tests (2026-11-15, all passed, on `throwaway-ntfs`, run with
 `scripts/enginetest.sh`).**

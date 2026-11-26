@@ -57,6 +57,9 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
         case 'busy':
             $args = ['busy'];
             break;
+        case 'cancel-unlock':
+            $args = ['cancel-unlock'];
+            break;
         case 'status':
             $args = ['status', $name];
             break;

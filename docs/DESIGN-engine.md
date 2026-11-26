@@ -46,6 +46,7 @@ and is hard to change later).
 | `vcmount dismount --all` | The same for every mounted volume. Used by the `unmounting_disks` hook. |
 | `vcmount stop-dependents --all` | Stops the dependents of every mounted volume; the volumes stay mounted. Used by the `stopping_docker` hook. |
 | `vcmount start-dependents --all` | Starts the dependents of every mounted volume in list order. Used by the `docker_started` hook after Docker was switched off and on (LIFE-4). |
+| `vcmount cancel-unlock` | Creates the marker `/var/run/vcmount.cancel` and nothing else; takes no lock. A mount waiting for `cryptsetup` looks for it every half second and ends its own child at once (UI-8). Every unlock removes the marker before and after, so an old one cannot stop a later mount. SIGINT, SIGTERM and SIGHUP are caught during the check and end `cryptsetup` the same way. `vcmount busy --json` adds `unlocking_for`: seconds since a running check started (from `/var/run/vcmount.unlocking`, a timestamp only), or null. |
 | `vcmount repair-shares` | Makes the SMB shares match the mounted volumes: adds missing ones, removes left-over ones (section 9b). |
 | `vcmount options` | Lists the Unraid users and the Docker containers, for the web forms. Changes nothing. |
 | `vcmount config` | Shows the saved settings as stored, with their revision (a SHA-256 fingerprint of the file, or `none`). Changes nothing. |

@@ -74,6 +74,13 @@ const MAX_CONFIG_SIZE = 1048576;
 
 // Held while an action that changes something runs. In RAM.
 const LOCK_FILE = '/var/run/vcmount.lock';
+// Created by "vcmount cancel-unlock"; a running unlock sees it and ends its own
+// cryptsetup (UI-8). Removed at the start and end of every unlock.
+const CANCEL_FILE = '/var/run/vcmount.cancel';
+const CANCEL_POLL = 500000;    // microseconds between looks for CANCEL_FILE
+// Holds the start time of the password check while cryptsetup runs, so "busy"
+// can tell a waiting page that an unlock is under way. Only a time, no name.
+const UNLOCKING_FILE = '/var/run/vcmount.unlocking';
 
 // Time limits in seconds, so the engine can never hang forever.
 const UNLOCK_TIMEOUT = 180;    // cryptsetup checking a password (slow on purpose)
@@ -96,6 +103,7 @@ Usage:
                                              unless the setting turns that off
   vcmount stop-dependents --all              stop the dependents of every mounted volume
   vcmount start-dependents --all             start the dependents of every mounted volume
+  vcmount cancel-unlock                      stop a mount that is still checking the password
   vcmount repair-shares                      make the SMB shares match the mounted volumes
   vcmount options                            list the users and containers the forms offer
   vcmount busy                               say whether another vcmount action is running
@@ -642,7 +650,8 @@ function program(string $name): string
  * $stdin: what the program gets as standard input. Default: nothing.
  * $show_errors: let the program write its error messages straight to the user.
  */
-function run(array $command, int $timeout, $stdin = null, bool $show_errors = false): array
+function run(array $command, int $timeout, $stdin = null, bool $show_errors = false,
+             bool $cancellable = false): array
 {
     $spec = [
         0 => $stdin ?? ['file', '/dev/null', 'r'],
@@ -661,6 +670,18 @@ function run(array $command, int $timeout, $stdin = null, bool $show_errors = fa
     }
     $deadline = microtime(true) + $timeout;
     $timed_out = false;
+    $cancelled = false;
+    // Ctrl+C, a closed terminal or a stop signal also reach cryptsetup, which
+    // ignores them until its key derivation ends. Catch them here instead and
+    // end the child below (UI-8).
+    $stop = false;
+    $signals = [SIGINT, SIGTERM, SIGHUP];
+    if ($cancellable) {
+        pcntl_async_signals(true);
+        foreach ($signals as $signal) {
+            pcntl_signal($signal, function () use (&$stop) { $stop = true; });
+        }
+    }
 
     while ($open !== []) {
         $left = $deadline - microtime(true);
@@ -669,10 +690,24 @@ function run(array $command, int $timeout, $stdin = null, bool $show_errors = fa
             proc_terminate($process);
             break;
         }
+        if ($cancellable && ($stop || file_exists(CANCEL_FILE))) {
+            // Our own child, not yet collected, so its process number cannot
+            // belong to another program. cryptsetup writes nothing before the
+            // password is right, so ending it at once is safe.
+            $cancelled = true;
+            proc_terminate($process, 9);
+            break;
+        }
         $read = array_values($open);
         $write = null;
         $except = null;
-        if (stream_select($read, $write, $except, (int) ceil($left)) === false) {
+        $ready = $cancellable
+            ? stream_select($read, $write, $except, 0, (int) min($left * 1e6, CANCEL_POLL))
+            : stream_select($read, $write, $except, (int) ceil($left));
+        if ($ready === false) {
+            if ($stop) {
+                continue;   // interrupted by a signal: end the child above
+            }
             break;
         }
         foreach ($read as $pipe) {
@@ -701,12 +736,18 @@ function run(array $command, int $timeout, $stdin = null, bool $show_errors = fa
         }
     }
     $code = proc_close($process);
+    if ($cancellable) {
+        foreach ($signals as $signal) {
+            pcntl_signal($signal, SIG_DFL);
+        }
+    }
 
     return [
-        'code' => $timed_out ? -1 : $code,
+        'code' => ($timed_out || $cancelled) ? -1 : $code,
         'out' => $text[1],
         'err' => $text[2],
         'timed_out' => $timed_out,
+        'cancelled' => $cancelled,
     ];
 }
 
@@ -1176,6 +1217,7 @@ function lock_again(string $mapper): bool
 function do_mount(string $name, string $file, string $point, bool $read_only,
                   array $keyfiles = [], bool $pim = false, bool $hidden = false): void
 {
+    @unlink(CANCEL_FILE);   // an old cancel must not stop this unlock
     $real = realpath($file);
     if ($real === false || !is_file($real)) {
         throw new Fail("The volume file $file does not exist or is not an ordinary file.", CODE_USAGE);
@@ -1219,9 +1261,18 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
     }
     $command[] = $real;
     $command[] = $mapper;
-    $r = run($command, UNLOCK_TIMEOUT, STDIN, true);
+    @file_put_contents(UNLOCKING_FILE, (string) time());
+    try {
+        $r = run($command, UNLOCK_TIMEOUT, STDIN, true, true);
+    } finally {
+        @unlink(CANCEL_FILE);
+        @unlink(UNLOCKING_FILE);
+    }
     if ($r['code'] !== 0) {
         lock_again($mapper);
+        if ($r['cancelled']) {
+            throw new Fail('Unlocking was cancelled.', CODE_UNLOCK_FAILED);
+        }
         if ($r['timed_out']) {
             throw new Fail('Unlocking took too long and was stopped.', CODE_UNLOCK_FAILED);
         }
@@ -2085,6 +2136,27 @@ function command_privacy(array $args, bool $json): int
 }
 
 /**
+ * Ask a running unlock to stop (UI-8). Only leaves a marker; the mount that is
+ * waiting for cryptsetup ends its own child. Takes no lock, since the mount
+ * holds it. Without a running unlock the marker is removed by the next one.
+ */
+function command_cancel_unlock(array $args, bool $json): int
+{
+    if ($args !== []) {
+        throw new Fail('Usage: vcmount cancel-unlock', CODE_USAGE);
+    }
+    if (@touch(CANCEL_FILE) === false) {
+        throw new Fail('Could not create ' . CANCEL_FILE . '.', CODE_USAGE);
+    }
+    if ($json) {
+        echo json_encode(['ok' => true]), "\n";
+    } else {
+        echo "Asked a running unlock to stop.\n";
+    }
+    return CODE_OK;
+}
+
+/**
  * Is another vcmount action running right now? Tries the lock without waiting
  * and lets it go at once. The web page uses this after a lost answer.
  */
@@ -2098,8 +2170,12 @@ function command_busy(array $args, bool $json): int
     if ($handle !== false) {
         fclose($handle);   // also lets go of the lock if we got it
     }
+    // Seconds since a running password check started, or null.
+    $since = $busy ? @file_get_contents(UNLOCKING_FILE) : false;
+    $unlocking_for = ($since !== false && preg_match('/\A[0-9]+\z/', trim($since)) === 1)
+        ? max(0, time() - (int) trim($since)) : null;
     if ($json) {
-        echo json_encode(['ok' => true, 'busy' => $busy]), "\n";
+        echo json_encode(['ok' => true, 'busy' => $busy, 'unlocking_for' => $unlocking_for]), "\n";
     } else {
         echo $busy ? "Another vcmount action is running.\n" : "No vcmount action is running.\n";
     }
@@ -2570,6 +2646,8 @@ function main(array $argv): int
                 return command_options($args, $json);
             case 'busy':
                 return command_busy($args, $json);
+            case 'cancel-unlock':
+                return command_cancel_unlock($args, $json);
             case 'privacy':
                 return command_privacy($args, $json);
             case 'info':

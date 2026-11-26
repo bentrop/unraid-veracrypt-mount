@@ -23,6 +23,7 @@
     var lastTile = null;         // the tile's list as last drawn, to leave it alone when nothing changed
     var mountTarget = null;      // the volume the dialog is for; null = mount once
     var mounting = false;        // a mount request is on its way; a second click is ignored
+    var cancelling = false;      // Cancel was clicked during an unlock; waiting for the answer
     var pimWarned = false;       // the large-PIM warning was shown; the next click mounts
     var progressTimer = null;    // ticks the unlock progress once a second
     var UNLOCK_LIMIT = 180;      // seconds; the engine's UNLOCK_TIMEOUT
@@ -561,7 +562,7 @@
         $('#vcm-skip').prop('hidden', !inQueue);
         $('#vcm-mount-submit').prop('disabled', blocked).val('Mount');
         pimWarned = false;
-        $('#vcm-pim-warn').prop('hidden', true);
+        $('#vcm-pim-warn, #vcm-stop-other').prop('hidden', true);
         stopProgress();
         $('#vcm-modal').prop('hidden', false);
         $(blocked ? '#vcm-cancel' : (once ? '#vcm-file' : '#vcm-password')).trigger('focus');
@@ -605,12 +606,12 @@
         var start = Date.now();
         $('#vcm-progress-text').text('Checking the password…');
         $('#vcm-progress-note').text('This is slow on purpose: it makes guessing passwords slow too.'
-            + (withPim ? ' A PIM makes it slower still.' : '') + ' It is stopped after 3 minutes.');
+            + (withPim ? ' A PIM makes it slower still.' : '') + ' Cancel stops it; so does a limit of 3 minutes.');
         $('#vcm-progress-fill').css('width', '0');
         $('#vcm-progress').prop('hidden', false);
         var tick = function () {
             var s = Math.floor((Date.now() - start) / 1000);
-            $('#vcm-progress-time').text(Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2));
+            $('#vcm-progress-time').text(clock(s));
             $('#vcm-progress-fill').css('width', Math.min(100, s / UNLOCK_LIMIT * 100) + '%');
             if (s >= UNLOCK_LIMIT) { $('#vcm-progress-text').text('Taking too long, stopping…'); }
         };
@@ -621,6 +622,65 @@
     function stopProgress() {
         if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
         $('#vcm-progress').prop('hidden', true);
+        cancelling = false;
+        $('#vcm-cancel').prop('disabled', false).val('Cancel');
+    }
+
+    /**
+     * Cancel during an unlock (UI-8): ask the engine to stop. The mount request
+     * that is still on its way then answers "Unlocking was cancelled", or, if the
+     * password was already accepted, that the volume is mounted.
+     */
+    function cancelUnlock() {
+        if (cancelling) { return; }
+        cancelling = true;
+        stopQueue();
+        $('#vcm-cancel').prop('disabled', true).val('Cancelling…');
+        $('#vcm-progress-text').text('Cancelling…');
+        act({ action: 'cancel-unlock' });
+    }
+
+    function clock(s) {
+        return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2);
+    }
+
+    /**
+     * The engine was busy with another action, so nothing was done. Say what is
+     * running; if it is another unlock, offer to stop it (UI-8).
+     */
+    function otherBusy() {
+        act({ action: 'busy' }).then(function (b) {
+            if (b.ok && b.busy && b.unlocking_for !== null && b.unlocking_for !== undefined) {
+                var left = Math.max(0, UNLOCK_LIMIT + 5 - b.unlocking_for);
+                dialogError('Another volume is still being unlocked (for ' + clock(b.unlocking_for)
+                    + '; it stops by itself within about ' + clock(left) + '), so nothing was done. '
+                    + 'Wait for it, or stop it and try again.');
+                $('#vcm-stop-other').prop('disabled', false).val('Stop that unlock').prop('hidden', false);
+            } else if (b.ok && b.busy) {
+                dialogError('Another action is still running, for example a dismount, so nothing was done. '
+                    + 'Please try again in a moment.');
+            } else if (!b.ok) {
+                dialogError('Another action was running, so nothing was done. Please try again.');
+            } else {
+                dialogError('Another action was running and has just finished. Please try again.');
+            }
+        });
+    }
+
+    function stopOther() {
+        $('#vcm-stop-other').prop('disabled', true).val('Stopping…');
+        act({ action: 'cancel-unlock' }).then(function () {
+            var tries = 0;
+            (function poll() {
+                act({ action: 'busy' }).then(function (b) {
+                    if (b.ok && b.busy && ++tries < 10) { setTimeout(poll, 500); return; }
+                    $('#vcm-stop-other').prop('hidden', true);
+                    dialogError(b.ok && !b.busy
+                        ? 'The other unlock was stopped. Enter the password and click Mount.'
+                        : 'The other action is still running. Please try again in a moment.');
+                });
+            })();
+        });
     }
 
     function dialogError(text) {
@@ -737,7 +797,7 @@
             pim = null;
             return;
         }
-        $('#vcm-pim-warn').prop('hidden', true);
+        $('#vcm-pim-warn, #vcm-stop-other').prop('hidden', true);
         var withPim = pim !== '';
         mounting = true;
         data.password = field.val();
@@ -754,8 +814,10 @@
         act(data).then(function (a) {
             if (a.ok) {
                 mounted(a);
-            } else if (a.lost || a.code === 6) {
-                settle(name, !!a.lost);
+            } else if (a.lost) {
+                settle(name, true);
+            } else if (a.code === 6) {
+                otherBusy();
             } else {
                 dialogError(a.error || 'The volume could not be mounted.');
                 field.trigger('focus');
@@ -1216,6 +1278,7 @@
     $(function () {
         // The password form first (review H1): it must never be left to the browser.
         $('#vcm-mount-form').on('submit', submitMount);
+        $('#vcm-stop-other').on('click', stopOther);
         // A changed PIM is checked again.
         $('#vcm-pim').on('input', function () {
             if (!pimWarned) { return; }
@@ -1249,7 +1312,10 @@
         $('#vcm-mount-all').on('click', mountAll);
         $('#vcm-once').on('click', function () { stopQueue(); openDialog(null); });
         $('#vcm-dismount-all').on('click', dismountAll);
-        $('#vcm-cancel').on('click', function () { stopQueue(); closeDialog(); refresh(); });
+        $('#vcm-cancel').on('click', function () {
+            if (mounting) { cancelUnlock(); return; }
+            stopQueue(); closeDialog(); refresh();
+        });
         $('#vcm-skip').on('click', function () { closeDialog(); nextInQueue(); });
         $(document).on('keydown', function (e) {
             if (e.key === 'Escape' && !$('#vcm-modal').prop('hidden')) { $('#vcm-cancel').trigger('click'); }

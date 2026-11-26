@@ -62,6 +62,7 @@ $vcm_display = $GLOBALS['display'] ?? [];
     </div>
     <div class="vcm-buttons">
       <input type="submit" id="vcm-mount-submit" value="Mount">
+      <input type="button" id="vcm-stop-other" value="Stop that unlock" hidden>
       <input type="button" id="vcm-skip" value="Skip" hidden>
       <input type="button" id="vcm-cancel" value="Cancel">
     </div>
