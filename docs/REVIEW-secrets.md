@@ -538,3 +538,281 @@ K6 can follow in a later version.
   showed a related fault: cryptsetup does not stop on SIGTERM during a long key
   derivation, so a time limit did not end it; the engine now ends it 5 seconds later.
   2, 5 and 6 remain open.
+
+## 9. Third review: cancelling an unlock (commit 68d3415)
+
+- **Date:** 2026-11-26
+- **Reviewer:** Claude, in a separate session that wrote none of this code (SEC-9).
+- **Method:** reading the code only. Nothing was run, the server was not contacted,
+  `.secrets/` was not opened, no code was changed. Only this section was added.
+- **Scope:** the diff of 68d3415 and the current files: in `scripts/vcmount` `run()`,
+  `do_mount` (the markers `CANCEL_FILE` and `UNLOCKING_FILE`), `command_cancel_unlock`
+  and `command_busy`; the `cancel-unlock` case in `include/actions.php`; `cancelUnlock`,
+  `otherBusy`, `stopOther` and the changed "busy" branch of `submitMount` in
+  `js/vcmount.js`; the new button in `include/dialog.php`. From 28cc04b only the
+  `KILL_GRACE` part of `run()`.
+
+### 9.1 Summary
+
+**Is the cancel path sound? Yes. It does not touch the password or the PIM, and it can
+end no program except the engine's own `cryptsetup`.** No finding is a leak, and none is
+rated high.
+
+- **What the new action can do.** `cancel-unlock` starts the engine with a fixed
+  argument list. It reads no field of the request: no name, no process number. Like every
+  request it passes Unraid's login and CSRF check first. All it does is create an empty
+  file. Only a mount that is waiting for `cryptsetup` reads that file, and that mount then
+  ends the one child it started itself. It finds that child through the handle PHP gave it,
+  not through a number someone passed in. PHP has not yet *collected* the child (asked the
+  system for its exit status), so the child's process number cannot have passed to another
+  program yet (one assumption, see C6).
+- **Ending cryptsetup early cannot damage the volume.** cryptsetup only reads VeraCrypt
+  headers and never writes them (SEC-7). Killing it during the password check leaves
+  nothing behind. Killing it in the split second after the password was accepted can
+  leave an open decrypted device. The code then locks the volume again, but does not
+  check that this worked (C1).
+- **The markers reveal nothing.** One is an empty file, the other holds the number of
+  seconds since 1970. Both have fixed names and contain no volume name, path, password or
+  PIM. `busy` passes on only a whole number of seconds.
+- **Stale markers.** The marker is removed under the engine's lock before every unlock
+  and again after it, so a marker left from earlier can never stop a later mount. A cancel
+  that *arrives* late can (C3, a narrow race).
+- **Signals.** They are caught only during the password check, and the handlers are
+  reset on every path out of `run()`. During the check, a signal ends the unlock cleanly
+  (except C1). After the check, a signal ends the engine at once, as it did before this
+  commit (C5).
+- **Password and PIM handling is unchanged.** The diff does not touch how they are read,
+  checked or passed on. The new requests carry only the action and the CSRF token. After
+  a "busy" answer the page asks the user again and does not resend anything.
+
+| Check from the task | Result |
+|---|---|
+| Ends no process except the engine's own cryptsetup | Met. See C6 for the one assumption. |
+| The markers reveal nothing | Met. |
+| The markers cannot be abused through a link planted in `/var/run` | Met in practice, because only root can write there. The code itself follows links (C4). |
+| A stale marker cannot cancel a later mount | Met. A late-arriving cancel can (C3). |
+| Signal handlers removed afterwards, no half-mounted volume | Removed: yes. Half-mounted: not from a signal during the check (except C1). After the check, the same as before this commit (C5). |
+| No password or PIM handling changed | Met. |
+| SEC-1, SEC-2, SEC-3, SEC-7 | Met. |
+
+### 9.2 Findings, most severe first
+
+#### C1. Low-medium: a cancelled unlock may leave the volume unlocked without saying so
+
+- **Where:** `do_mount` lines 1271-1275: `lock_again($mapper)` is called, its result is
+  ignored, and the answer is "Unlocking was cancelled." `run()` line 698 cancels with
+  SIGKILL, the stop signal a program cannot catch or delay.
+- **What could go wrong:** the engine looks for the marker every half second. If it sees
+  it just after cryptsetup has accepted the password, while cryptsetup is still setting up
+  the decrypted device, cryptsetup is killed half-way. `lock_again` then runs
+  `cryptsetup close`. If that fails (the device is held open for a moment, or it was left
+  half set up and `close` does not recognise it; neither was tested),
+  `/dev/mapper/vcm-<name>` stays open and its contents stay readable on the server. The
+  dialog still says the unlock was cancelled. The other failure paths in `do_mount` say
+  "It could NOT be locked again"; this one and the timeout path do not. The next mount of
+  that volume is refused as "already unlocked or mounted".
+- **How likely:** low. It needs a Cancel within milliseconds of the password being
+  accepted, and then a failed close. **How bad:** medium. The owner believes the volume
+  is locked while its contents can be read.
+- **Suggested fix:** on the cancelled and timed-out paths, check what `lock_again`
+  returns. If it failed, try once more after a second, then add "It could NOT be locked
+  again" to the message, as the other paths do.
+
+#### C2. Low: "busy" is now always read as somebody else's unlock, but it can be your own
+
+- **Where:** `submitMount` lines 819-820 (an answer with code 6, "busy", now goes to
+  `otherBusy` instead of `settle`); the comment above `settle` (735-740); `otherBusy` and
+  `stopOther`.
+- **What could go wrong:** `settle` was written for one case in particular: the browser
+  sends the same mount request twice on its own. Browsers may do this when a connection
+  that was kept open breaks before any answer arrives. The second copy finds the engine
+  busy with the first copy and gets code 6, and only that answer reaches the page. Until
+  this commit, the page then waited and reported the volume's real state. Now it says
+  "Another volume is still being unlocked ... nothing was done" and offers "Stop that
+  unlock", which would stop the user's own unlock with the right password. If the user
+  does nothing, the volume gets mounted while the dialog says nothing was done. No secret
+  is involved; the page simply says something untrue.
+- **How likely:** low, because it needs a duplicate request. **How bad:** low: a wrong
+  message, at worst an unwanted cancel.
+- **Suggested fix:** keep both behaviours. Show the new message and button, and keep
+  polling in the background as `settle` does. Once nothing is busy, if this volume is
+  mounted, report it as mounted.
+
+#### C3. Low: a cancel does not say which unlock it is for, so a late one can stop the next unlock and an early one gets lost
+
+- **Where:** `command_cancel_unlock` (lines 2143-2157); `do_mount` line 1220 (removes the
+  marker at the start) and line 1268 (removes it afterwards).
+- **What could go wrong:** the marker only means "stop whatever unlock is running".
+  1. A Cancel clicked just as unlock A finishes may reach the engine only after A is done
+     and a new unlock B (from another tab or over SSH) has started. B is then cancelled.
+  2. A Cancel clicked a fraction of a second after Mount may arrive before the mount
+     reaches line 1220, which removes it. The unlock then runs to the end and may mount
+     the volume, although the user's last click was Cancel.
+
+  "Stop that unlock" likewise stops whichever unlock is running at the moment it is
+  clicked. A marker left over from earlier never stops a later mount, because it is
+  removed under the lock before every unlock.
+- **How likely:** very low. Case 1 needs two people or tabs acting within a fraction of a
+  second of each other; case 2 needs Mount and Cancel (or Escape) within about 0.1
+  seconds. **How bad:** low. An unlock fails, or completes against the last click;
+  nothing leaks.
+- **Suggested fix:** acceptable as it is; noting the race in DESIGN-engine is enough. If a
+  fix is wanted later: the page sends a random number with the mount and the same number
+  with its Cancel. The engine keeps the number in `vcmount.unlocking` and honours only a
+  cancel that carries it.
+
+#### C4. Low: the marker files follow symbolic links
+
+- **Where:** `touch(CANCEL_FILE)` (line 2148), `file_put_contents(UNLOCKING_FILE, ...)`
+  (1264) and `file_get_contents(UNLOCKING_FILE)` (2174). The older `LOCK_FILE` does the
+  same.
+- **What could go wrong:** a *symbolic link* is a file that points to another file.
+  Suppose someone placed `/var/run/vcmount.unlocking` as a link to
+  `/boot/config/super.dat`. The next unlock would then overwrite that file, as root, with
+  a time stamp. A link at `vcmount.cancel` would make `cancel-unlock` create an empty file
+  wherever it points. And `busy` would read the link's target and, if the target holds
+  only digits, reveal its value as "seconds since". Removing a link with `unlink` is
+  harmless: it removes only the link, not the file it points to.
+- **How likely:** practically nil. Normally only root can write to `/var/run` (open
+  check 1), and root needs no trick to do any of this. **How bad:** high if it ever
+  happened, which is why it is listed.
+- **Suggested fix:** cheap defence in depth. Keep the three files in a folder of their
+  own: the engine creates `/var/run/vcmount/` with mode 0700 and refuses to use it if it
+  is a link or not owned by root. Alternatively, remove the name before writing and create
+  the file fresh with `fopen(..., 'x')`, which fails if anything is already there.
+
+#### C5. Low (not new): after the password check, a signal still ends the engine at once
+
+- **Where:** `run()` lines 739-743 reset the handlers once cryptsetup has finished. After
+  that come `do_mount` from line 1297 (blkid, the mount folder, mount) and
+  `command_mount` lines 1429-1443 (share, dependents). Separately, `vcm_run` in
+  `actions.php` (lines 222-230) sends SIGTERM to the engine after 300 seconds.
+- **What could go wrong:** Ctrl+C, a closed SSH window or the page's 5-minute limit during
+  these steps ends the engine without cleaning up. The volume can be left unlocked but not
+  mounted, or mounted without its share or its dependents, and the mount folder may stay
+  behind. The page then shows "The engine took too long and was stopped". The 5-minute
+  limit is reachable: a slow unlock (up to 185 s), the network check (up to 65 s) and a
+  few dependents (up to 65 s each) add up. Before this commit the same was true, and the
+  unlock itself was worse, because cryptsetup ran on alone. The commit made the problem
+  smaller.
+- **How likely:** low. **How bad:** low-medium. Nothing is damaged, but the volume is not
+  in the state that was asked for.
+- **Suggested fix:** keep the three signals caught, but only noted, from the start of
+  `do_mount` until the mount has either finished or been fully undone. A signal noted
+  after the password check then means "finish cleanly, then stop".
+
+#### C6. Informational
+
+- **Process numbers.** A child's process number stays reserved until PHP collects the
+  child. The exception is an engine started with SIGCHLD (the signal "a child has ended")
+  set to "ignore": the system then collects children by itself and frees their numbers.
+  Neither Unraid's web server nor a shell starts the engine that way today. One line at
+  the start of a cancellable `run()`, `pcntl_signal(SIGCHLD, SIG_DFL)`, makes it certain.
+  Even without it, the number would have to be handed to a new program within half a
+  second.
+- **Signal handling in `run()`:**
+  - Afterwards the handlers are set to "default" rather than restored to what they were
+    (`pcntl_signal_get_handler`), and this is not done in a `finally`.
+  - They are installed after `proc_open`. That leaves a moment in which Ctrl+C ends the
+    engine but not cryptsetup. Installing them first closes it.
+  - If `stream_select` fails for a reason other than a signal, the loop breaks off. Then
+    `proc_close` waits with no time limit and no cancel: the very hang 28cc04b fixed.
+    Continuing the loop instead is safe, because the deadline still ends it.
+  - `$signals = [SIGINT, ...]` is built on every call to `run()`, so every engine command
+    needs PHP's pcntl module. Bob has it and it ships with Unraid (SEC-6). Building the
+    list inside `if ($cancellable)` would limit that to the unlock.
+- **Ctrl+C at the password prompt.** The engine kills cryptsetup with SIGKILL before
+  cryptsetup can switch the terminal's echo back on, so what is typed next may not appear
+  on screen until `reset`. That is the safe direction (nothing is shown), but it is
+  confusing (open check 3).
+- **If the engine itself is killed hard** (SIGKILL, or the system running out of memory),
+  cryptsetup runs on alone. It probably also keeps the engine lock, because it inherits
+  the lock file's handle: PHP does not open the lock file with close-on-exec. The page
+  then reports an unlock that "Stop that unlock" cannot stop, because no engine is left
+  to read the marker. This is a known limit and needs no fix now (open check 4).
+- **`KILL_GRACE` (28cc04b) is sound.** SIGKILL goes only to the program `run()` started,
+  only after `proc_get_status` reports that it still runs, and before it is collected. It
+  applies to every program the engine starts, but changes the outcome only for programs
+  that ignore SIGTERM. Children of the started program are not signalled, as before.
+  180 + 5 seconds stays below the page's 300, and the page's countdown counts the same
+  5 seconds.
+- **The page.** `otherBusy` and `stopOther` show only numbers and fixed texts, through
+  `.text()`. The new button has no `name` and is `type="button"`, so it never submits the
+  form. Each of `stopOther`'s ten `busy` checks takes the lock for an instant, as `settle`
+  does. An action started elsewhere at exactly that instant answers "busy".
+
+### 9.3 What I checked and found in order
+
+- **Web request.** `cancel-unlock` builds `['cancel-unlock', '--json']` and nothing else;
+  it reads no field of the request. It is a POST like every action, so Unraid's token
+  check runs first.
+- **Engine, `cancel-unlock`.** It takes no arguments, creates the marker with `touch` and
+  takes no lock. That is correct, since the mount holds the lock.
+- **Engine, `busy`.** It reads the time file only while the lock is held, accepts only
+  digits and returns `max(0, now - start)`.
+- **Engine, `do_mount`.** The marker is removed after `take_lock` (in `command_mount`) and
+  before any check. The time file is written just before `run()`. Both are removed in a
+  `finally`, so also when `run()` throws. A cancelled unlock answers code 2 with a fixed
+  text. For a saved volume the log says "could not unlock"; for "mount once" nothing is
+  logged (PRIV-2 holds).
+- **Engine, `run()`.** I traced every way out of the loop: the deadline (SIGTERM, then the
+  grace period, then SIGKILL), a cancel or signal (SIGKILL), a failed `select`, and the
+  normal end of output. All of them reach `proc_close` and the handler reset. Standard
+  input is still passed through untouched, and the engine reads none of it, also on a
+  cancel. Whatever is left unread disappears when the engine ends. SIGKILL writes no core
+  dump (a copy of a program's memory saved to disk when it crashes), so cryptsetup's
+  memory is not saved anywhere.
+- **Page.** `cancelUnlock` stops the "Mount all" queue first, so no next volume is asked
+  for, and it sends only the action. The dialog stays open until the mount's own answer
+  arrives; `closeDialog` still refuses to close while a mount is under way. Escape
+  triggers the same Cancel. The password and PIM fields were already emptied when Mount
+  was clicked. After a "busy" answer the page asks for them again and keeps no copy.
+- **Tests recorded in SPEC section 10** (2026-11-26): a cancel was answered within a
+  second, and the right PIM mounted straight after. That also shows that no loop device
+  (the kernel device that presents the volume file as a disk) and no decrypted device was
+  left, or that mount would have been refused. Also tested: "Stop that unlock" after a
+  reload, Ctrl+C in the web terminal, no cryptsetup left afterwards, and the PIM nowhere
+  under `/var/log` and `/tmp`.
+
+### 9.4 What I could not verify (open checks; read-only or on throwaway volumes)
+
+1. **Who may write to `/var/run` (C4).** `ls -ld /var/run /run`: expected owner root,
+   mode `drwxr-xr-x`.
+2. **Nothing left after a cancel (C1).** After a Cancel and after Ctrl+C on
+   `throwaway-pim`: no `/dev/mapper/vcm-*` and no loop device for the file
+   (`/sys/block/loop*/loop/backing_file`). The recorded remount suggests this already; a
+   direct look settles it.
+3. **The terminal after Ctrl+C at the prompt (C6).** In Unraid's web terminal, press
+   Ctrl+C while cryptsetup asks for the password, then type a harmless command such as
+   `date`. Is it shown?
+4. **Lock inheritance (C6).** During an unlock, `ls -l /proc/<cryptsetup's process
+   number>/fd`: does it list `/var/run/vcmount.lock`?
+
+### 9.5 Recommendation
+
+The cancel path is sound and adds no way for a secret to leak. Two changes are worth
+making before release: C1 (check what `lock_again` returns and say so, a few lines) and
+C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be documented.
+
+### 9.6 Follow-up (2026-11-27)
+
+- **C1 fixed:** after a cancelled or timed-out unlock the engine checks that locking
+  again worked, tries once more after a second, and otherwise says "The volume could
+  NOT be locked again".
+- **C2 fixed:** after a "busy" answer the page shows the message and keeps checking
+  quietly; if this volume ends up mounted it reports it as mounted, otherwise it says
+  when the other action is over. "Stop that unlock" ends that check.
+- **C4 fixed:** the marker files are created fresh with `fopen(..., 'x')` after removing
+  whatever had the name, and read only if they are plain files.
+- **C6 fixed:** the signal handlers are installed before cryptsetup starts, SIGCHLD is
+  set to default during the unlock, and all of them are restored to what they were in a
+  `finally`; pcntl is needed only for the unlock. A failed `stream_select` no longer
+  ends the wait early, so `proc_close` cannot wait without a limit.
+- **C3** documented in DESIGN-engine; **C5** left for later.
+- **Retested on Bob (2026-11-27, Unraid 7.4.1, by the owner):** Cancel in the dialog,
+  the busy message with "Stop that unlock" after a reload, and Ctrl+C during the
+  password check all passed; after Ctrl+C the terminal showed typed text normally.
+- **Open checks of 9.4:** 1 passed: `/var/run` links to `/run`, owned by root, mode
+  `drwxr-xr-x`. 2 passed: after the cancels `/dev/mapper` held only `control`. 3 passed
+  for Ctrl+C during the check; Ctrl+C at the password prompt itself was not tried.
+  4 not done.

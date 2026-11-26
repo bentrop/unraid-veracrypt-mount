@@ -525,6 +525,7 @@
     }
 
     function openDialog(name) {
+        busyWatch++;
         // Over plain HTTP the setting must be known first; until then, ask for it.
         if (overHttp && httpsRequired === null) {
             act({ action: 'list' }).then(function (a) {
@@ -569,6 +570,7 @@
     }
 
     function closeDialog() {
+        if (!mounting) { busyWatch++; }
         if (mounting) { return; }   // not while a mount is on its way
         $('#vcm-password, #vcm-pim').val('');
         $('#vcm-modal').prop('hidden', true);
@@ -648,7 +650,39 @@
      * The engine was busy with another action, so nothing was done. Say what is
      * running; if it is another unlock, offer to stop it (UI-8).
      */
-    function otherBusy() {
+    var busyWatch = 0;   // counts up whenever the dialog changes; an old watch then stops
+
+    /**
+     * After a "busy" answer, keep checking quietly (review C2). The busy action
+     * may have been this very mount: a browser can send a request twice, and
+     * the copy is the one that answers "busy". If this volume ends up mounted,
+     * say so; otherwise say when the other action is over.
+     */
+    function watchBusy(name) {
+        var id = ++busyWatch;
+        var tries = 0;
+        (function poll() {
+            setTimeout(function () {
+                if (id !== busyWatch) { return; }
+                act({ action: 'busy' }).then(function (b) {
+                    if (id !== busyWatch) { return; }
+                    if ((!b.ok || b.busy) && ++tries < 150) { poll(); return; }
+                    act({ action: 'status', name: name }).then(function (s) {
+                        if (id !== busyWatch) { return; }
+                        $('#vcm-stop-other').prop('hidden', true);
+                        if (s.ok && s.volume && s.volume.state === 'mounted') {
+                            mounted({});
+                        } else {
+                            dialogError('The other action is over. Enter the password and click Mount.');
+                        }
+                    });
+                });
+            }, 2000);
+        })();
+    }
+
+    function otherBusy(name) {
+        watchBusy(name);
         act({ action: 'busy' }).then(function (b) {
             if (b.ok && b.busy && b.unlocking_for !== null && b.unlocking_for !== undefined) {
                 var left = Math.max(0, UNLOCK_LIMIT + 5 - b.unlocking_for);
@@ -668,6 +702,7 @@
     }
 
     function stopOther() {
+        busyWatch++;   // this answer replaces the quiet check
         $('#vcm-stop-other').prop('disabled', true).val('Stopping…');
         act({ action: 'cancel-unlock' }).then(function () {
             var tries = 0;
@@ -800,6 +835,7 @@
         $('#vcm-pim-warn, #vcm-stop-other').prop('hidden', true);
         var withPim = pim !== '';
         mounting = true;
+        busyWatch++;
         data.password = field.val();
         data.no_password = data.password === '' ? '1' : '0';
         if (pim !== '') { data.pim = pim; }
@@ -817,7 +853,7 @@
             } else if (a.lost) {
                 settle(name, true);
             } else if (a.code === 6) {
-                otherBusy();
+                otherBusy(name);
             } else {
                 dialogError(a.error || 'The volume could not be mounted.');
                 field.trigger('focus');
@@ -960,14 +996,43 @@
             '</li>').attr('data-container', dep.container);
     }
 
-    function keyfileItem(path) {
-        return $('<li><span class="vcm-keyfile-path"></span> ' +
-                 '<a href="#" class="vcm-keyfile-remove" title="Remove">&#10005;</a></li>')
-            .attr('data-path', path).find('.vcm-keyfile-path').text(path).end();
+    var MAX_KEYFILES = 8;   // as the engine
+
+    /** One keyfile field with Unraid's file picker and a remove link. */
+    function addKeyfileRow(path) {
+        var row = $('<div class="vcm-keyfile"><input type="text" class="e-keyfile" spellcheck="false" '
+            + 'autocomplete="off" placeholder="/mnt/..." data-pickroot="/mnt/" data-pickcloseonfile="true">'
+            + '<a href="#" class="vcm-keyfile-remove" title="Remove this keyfile">&#10005;</a>'
+            + '<span class="vcm-note" hidden>Already listed above; counts once.</span></div>');
+        row.find('input').val(path || '');
+        $('#e-keyfiles').append(row);
+        if ($.fn.fileTreeAttach) { row.find('input').fileTreeAttach(); }
+        keyfileRows();
+        return row;
     }
 
+    /** One field needs no remove link; the add link stops at the limit. */
+    function keyfileRows() {
+        var rows = $('#e-keyfiles .vcm-keyfile');
+        rows.find('.vcm-keyfile-remove').prop('hidden', rows.length < 2);
+        $('#e-keyfile-add').prop('hidden', rows.length >= MAX_KEYFILES);
+        // A repeated path is saved once; say so under the repeat.
+        var seen = [];
+        rows.each(function () {
+            var p = $.trim($(this).find('input').val());
+            $(this).find('.vcm-note').prop('hidden', !p || seen.indexOf(p) < 0);
+            if (p) { seen.push(p); }
+        });
+    }
+
+    /** The filled-in keyfile paths, without empty fields or repeats. */
     function keyfilePaths() {
-        return $('#e-keyfiles li').map(function () { return $(this).attr('data-path'); }).get();
+        var paths = [];
+        $('#e-keyfiles .e-keyfile').each(function () {
+            var p = $.trim($(this).val());
+            if (p && paths.indexOf(p) < 0) { paths.push(p); }
+        });
+        return paths;
     }
 
     function depChoices() {
@@ -1128,9 +1193,8 @@
             $('#e-ro').prop('checked', !!v.read_only);
             $('#e-pim').prop('checked', !!v.pim);
             $('#e-hidden').prop('checked', !!v.hidden);
-            $('#e-keyfile').val('');
             $('#e-keyfiles').empty();
-            (v.keyfiles || []).forEach(function (p) { $('#e-keyfiles').append(keyfileItem(p)); });
+            ((v.keyfiles || []).length ? v.keyfiles : ['']).forEach(function (p) { addKeyfileRow(p); });
             var own = !v.mount_at || v.mount_at === '/mnt/addons/' + v.name;
             $('#e-mount-mode').val(own ? 'own' : 'share');
             $('#e-mount-at').val(own ? '' : v.mount_at);
@@ -1208,6 +1272,7 @@
         if (v.mount_at !== undefined && v.mount_at.indexOf('/mnt/user/') !== 0) {
             return 'Choose a folder inside a share: its path starts with /mnt/user/.';
         }
+        if ((v.keyfiles || []).some(function (k) { return k.indexOf('/mnt/') !== 0; })) { return 'A keyfile must be a file under /mnt/.'; }
         if ((v.keyfiles || []).indexOf(v.file) >= 0) { return 'The volume file cannot be its own keyfile.'; }
         if (v.share && !Object.keys(v.share.users).length) { return 'Give at least one user access to the share, or turn sharing off.'; }
         var bad = (v.dependents || []).some(function (d) {
@@ -1323,7 +1388,6 @@
 
         // The edit panel.
         $('#vcm-edit-form').on('input change', function (e) {
-            if (e.target.id === 'e-keyfile') { return; }   // counts only once added
             if (e.target.id === 'e-file') { suggestName(); }
             markDirty();
             toggleFields();
@@ -1336,23 +1400,18 @@
             markDirty();
             updateSummaries();
         });
-        // Keyfiles (KEY-2): pick a file, then add it to the list.
-        $('#e-keyfile-add').on('click', function () {
-            var path = $.trim($('#e-keyfile').val());
-            if (!path) { return; }
-            if (path.indexOf('/mnt/') !== 0) { editError('A keyfile must be a file under /mnt/.'); return; }
-            if (keyfilePaths().indexOf(path) < 0) {
-                if (keyfilePaths().length >= 8) { editError('At most 8 keyfiles.'); return; }
-                $('#e-keyfiles').append(keyfileItem(path));
-            }
-            $('#e-keyfile').val('');
-            editError('');
-            markDirty();
-            updateSummaries();
+        // Keyfiles (KEY-2): another field, or one fewer.
+        $('#e-keyfile-add').on('click', function (e) {
+            e.preventDefault();
+            // Use an empty field if there is one, rather than adding more.
+            var empty = $('#e-keyfiles .e-keyfile').filter(function () { return $.trim($(this).val()) === ''; });
+            (empty.length ? empty.first() : addKeyfileRow('').find('input')).trigger('focus');
         });
+        $('#e-keyfiles').on('input change', '.e-keyfile', keyfileRows);
         $('#e-keyfiles').on('click', '.vcm-keyfile-remove', function (e) {
             e.preventDefault();
-            $(this).closest('li').remove();
+            $(this).closest('.vcm-keyfile').remove();
+            keyfileRows();
             markDirty();
             updateSummaries();
         });
@@ -1381,7 +1440,6 @@
             $('#e-file').fileTreeAttach();
             $('#e-mount-at').fileTreeAttach();
             $('#vcm-file').fileTreeAttach();   // "Mount a file once" (Volumes tab only)
-            $('#e-keyfile').fileTreeAttach();
             $('#vcm-keyfile').fileTreeAttach();
         }
         // "Mount a file once": fill an empty name from the chosen file, as "Add volume" does.

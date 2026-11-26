@@ -653,6 +653,37 @@ function program(string $name): string
 function run(array $command, int $timeout, $stdin = null, bool $show_errors = false,
              bool $cancellable = false): array
 {
+    // Ctrl+C, a closed terminal or a stop signal also reach cryptsetup, which
+    // ignores them until its key derivation ends. Catch them here instead and
+    // end the child below (UI-8). Installed before the child starts, so there
+    // is no moment in which a signal ends only this program; put back as they
+    // were on every way out.
+    $stop = false;
+    $previous = [];
+    if ($cancellable) {
+        pcntl_async_signals(true);
+        // With SIGCHLD ignored the system would collect the child itself and
+        // could hand its process number to another program.
+        $previous[SIGCHLD] = pcntl_signal_get_handler(SIGCHLD);
+        pcntl_signal(SIGCHLD, SIG_DFL);
+        foreach ([SIGINT, SIGTERM, SIGHUP] as $signal) {
+            $previous[$signal] = pcntl_signal_get_handler($signal);
+            pcntl_signal($signal, function () use (&$stop) { $stop = true; });
+        }
+    }
+    try {
+        return run_watched($command, $timeout, $stdin, $show_errors, $cancellable, $stop);
+    } finally {
+        foreach ($previous as $signal => $handler) {
+            pcntl_signal($signal, $handler);
+        }
+    }
+}
+
+/** The body of run(); $stop is set by run()'s signal handlers. */
+function run_watched(array $command, int $timeout, $stdin, bool $show_errors,
+                     bool $cancellable, bool &$stop): array
+{
     $spec = [
         0 => $stdin ?? ['file', '/dev/null', 'r'],
         1 => ['pipe', 'w'],
@@ -671,17 +702,6 @@ function run(array $command, int $timeout, $stdin = null, bool $show_errors = fa
     $deadline = microtime(true) + $timeout;
     $timed_out = false;
     $cancelled = false;
-    // Ctrl+C, a closed terminal or a stop signal also reach cryptsetup, which
-    // ignores them until its key derivation ends. Catch them here instead and
-    // end the child below (UI-8).
-    $stop = false;
-    $signals = [SIGINT, SIGTERM, SIGHUP];
-    if ($cancellable) {
-        pcntl_async_signals(true);
-        foreach ($signals as $signal) {
-            pcntl_signal($signal, function () use (&$stop) { $stop = true; });
-        }
-    }
 
     while ($open !== []) {
         $left = $deadline - microtime(true);
@@ -705,10 +725,11 @@ function run(array $command, int $timeout, $stdin = null, bool $show_errors = fa
             ? stream_select($read, $write, $except, 0, (int) min($left * 1e6, CANCEL_POLL))
             : stream_select($read, $write, $except, (int) ceil($left));
         if ($ready === false) {
-            if ($stop) {
-                continue;   // interrupted by a signal: end the child above
-            }
-            break;
+            // Interrupted by a signal, or a passing fault: look again. Giving
+            // up here would leave proc_close() waiting with no time limit; the
+            // deadline still ends the loop.
+            usleep(50000);
+            continue;
         }
         foreach ($read as $pipe) {
             $key = array_search($pipe, $open, true);
@@ -736,11 +757,6 @@ function run(array $command, int $timeout, $stdin = null, bool $show_errors = fa
         }
     }
     $code = proc_close($process);
-    if ($cancellable) {
-        foreach ($signals as $signal) {
-            pcntl_signal($signal, SIG_DFL);
-        }
-    }
 
     return [
         'code' => ($timed_out || $cancelled) ? -1 : $code,
@@ -1261,7 +1277,7 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
     }
     $command[] = $real;
     $command[] = $mapper;
-    @file_put_contents(UNLOCKING_FILE, (string) time());
+    write_marker(UNLOCKING_FILE, (string) time());
     try {
         $r = run($command, UNLOCK_TIMEOUT, STDIN, true, true);
     } finally {
@@ -1269,12 +1285,17 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
         @unlink(UNLOCKING_FILE);
     }
     if ($r['code'] !== 0) {
-        lock_again($mapper);
-        if ($r['cancelled']) {
-            throw new Fail('Unlocking was cancelled.', CODE_UNLOCK_FAILED);
-        }
-        if ($r['timed_out']) {
-            throw new Fail('Unlocking took too long and was stopped.', CODE_UNLOCK_FAILED);
+        $locked = lock_again($mapper);
+        if ($r['cancelled'] || $r['timed_out']) {
+            // cryptsetup may have been ended just after the password was
+            // accepted, while it set up the device (review C1). Make sure.
+            if (!$locked) {
+                sleep(1);
+                $locked = lock_again($mapper);
+            }
+            throw new Fail(($r['cancelled'] ? 'Unlocking was cancelled.' : 'Unlocking took too long and was stopped.')
+                . ($locked ? '' : ' The volume could NOT be locked again: dismount it, or restart the server.'),
+                CODE_UNLOCK_FAILED);
         }
         if ($r['code'] === 2) {
             // cryptsetup cannot tell which part was wrong.
@@ -2136,6 +2157,33 @@ function command_privacy(array $args, bool $json): int
 }
 
 /**
+ * Write one of the marker files in /var/run. Whatever has that name is removed
+ * first and the file is created new ('x' fails if anything is there again), so
+ * a planted link can never send the write elsewhere (review C4).
+ */
+function write_marker(string $path, string $content): bool
+{
+    @unlink($path);
+    $handle = @fopen($path, 'x');
+    if ($handle === false) {
+        return false;
+    }
+    fwrite($handle, $content);
+    fclose($handle);
+    return true;
+}
+
+/** Read a marker file, but never through a link. */
+function read_marker(string $path): ?string
+{
+    if (is_link($path) || !is_file($path)) {
+        return null;
+    }
+    $text = @file_get_contents($path);
+    return $text === false ? null : $text;
+}
+
+/**
  * Ask a running unlock to stop (UI-8). Only leaves a marker; the mount that is
  * waiting for cryptsetup ends its own child. Takes no lock, since the mount
  * holds it. Without a running unlock the marker is removed by the next one.
@@ -2145,7 +2193,7 @@ function command_cancel_unlock(array $args, bool $json): int
     if ($args !== []) {
         throw new Fail('Usage: vcmount cancel-unlock', CODE_USAGE);
     }
-    if (@touch(CANCEL_FILE) === false) {
+    if (!write_marker(CANCEL_FILE, '')) {
         throw new Fail('Could not create ' . CANCEL_FILE . '.', CODE_USAGE);
     }
     if ($json) {
@@ -2171,8 +2219,8 @@ function command_busy(array $args, bool $json): int
         fclose($handle);   // also lets go of the lock if we got it
     }
     // Seconds since a running password check started, or null.
-    $since = $busy ? @file_get_contents(UNLOCKING_FILE) : false;
-    $unlocking_for = ($since !== false && preg_match('/\A[0-9]+\z/', trim($since)) === 1)
+    $since = $busy ? read_marker(UNLOCKING_FILE) : null;
+    $unlocking_for = ($since !== null && preg_match('/\A[0-9]+\z/', trim($since)) === 1)
         ? max(0, time() - (int) trim($since)) : null;
     if ($json) {
         echo json_encode(['ok' => true, 'busy' => $busy, 'unlocking_for' => $unlocking_for]), "\n";

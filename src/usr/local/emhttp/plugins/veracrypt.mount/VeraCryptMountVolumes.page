@@ -95,24 +95,20 @@ $vcm = '/plugins/veracrypt.mount';
     <details class="vcm-fold">
       <summary>Unlocking <span class="vcm-sum" id="s-unlock"></span></summary>
       <dl class="vcm-form">
-        <dt>Keyfiles</dt>
-        <dd><ul id="e-keyfiles" class="vcm-keyfiles"></ul>
-            <input type="text" id="e-keyfile" spellcheck="false" autocomplete="off" placeholder="/mnt/..."
-                   data-pickroot="/mnt/" data-pickcloseonfile="true">
-            <input type="button" id="e-keyfile-add" value="Add keyfile">
-            <span class="vcm-note">Only the path is saved, never the file's content. A keyfile on a
-              removable drive must be connected when you mount. A keyfile kept on this server's shares
-              or disks does not protect against someone who takes the whole server: keep it on a
-              removable drive, or use a password as well.</span></dd>
+        <!-- One field per keyfile, as Unraid's Docker template lists paths. -->
+        <dt class="vcm-first-line">Keyfiles</dt>
+        <dd class="vcm-first-line"><div id="e-keyfiles"></div>
+            <a href="#" id="e-keyfile-add"><i class="fa fa-fw fa-plus"></i> Add another keyfile</a>
+            <span class="vcm-note">Only the path is saved, never the file's content. A keyfile on this
+              server's own disks does not protect against theft of the whole server; prefer a removable
+              drive.</span></dd>
         <dt>PIM</dt>
         <dd><label class="vcm-check"><input type="checkbox" id="e-pim"> Ask for a PIM when mounting.
             The PIM itself is never saved.</label></dd>
         <dt>Hidden volume</dt>
         <dd><label class="vcm-check"><input type="checkbox" id="e-hidden"> Open the hidden volume inside
-            this file, with the hidden volume's password.</label>
-            <span class="vcm-note">This setting is saved on the flash drive, so it shows that the file
-              holds a hidden volume. If nobody should be able to tell, use <b>Mount a file once</b>
-              instead.</span></dd>
+            this file, with the hidden volume's password. Saving this reveals that the file holds one;
+            to avoid that, use <b>Mount a file once</b>.</label></dd>
       </dl>
       <p class="vcm-warning" id="e-hidden-warn">If this file holds a hidden volume, mounting the outer
          volume read-write can overwrite and destroy the hidden one: Linux has no protection for it.

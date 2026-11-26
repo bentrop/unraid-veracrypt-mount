@@ -54,6 +54,14 @@
 .vcm-form dd { margin: 0; }
 .vcm-form input[type=text] { width: 100%; max-width: 420px; box-sizing: border-box; }
 .vcm-form .vcm-note { display: block; }
+.vcm-form .vcm-note[hidden] { display: none; }
+/* A label that lines up with the first line of a taller field (the keyfiles). */
+.vcm-form dt.vcm-first-line, .vcm-form dd.vcm-first-line { align-self: baseline; }
+.vcm-keyfile { display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; max-width: 420px; margin-bottom: 4px; }
+.vcm-keyfile .vcm-note { flex-basis: 100%; }
+.vcm-keyfile input[type=text] { flex: 1; min-width: 0; }
+.vcm-keyfile-remove[hidden], #e-keyfile-add[hidden] { display: none; }
+#e-keyfile-add { display: inline-block; margin: 2px 0 6px; }
 .vcm-fold { border: 1px solid rgba(128, 128, 128, .3); border-radius: 4px; margin: 10px 0; padding: 0 12px; }
 .vcm-fold > summary { cursor: pointer; padding: 10px 0; font-weight: bold; list-style-position: inside; }
 .vcm-fold[open] > summary { border-bottom: 1px solid rgba(128, 128, 128, .2); margin-bottom: 8px; }
@@ -71,8 +79,7 @@
 .vcm-dep.vcm-dep-gap { visibility: visible !important; border-style: dashed; opacity: .5; }
 #e-deps { padding: 4px 0; }
 .vcm-dep-remove { margin-left: auto; text-decoration: none; }
-.vcm-keyfiles { list-style: none; padding: 0; margin: 0 0 6px; }
-.vcm-keyfiles li { padding: 2px 0; word-break: break-all; }
+.vcm-keyfile-remove { text-decoration: none; }
 .vcm-keyfile-remove { margin-left: 8px; text-decoration: none; }
 
 /* Present for password managers, invisible to people. */
