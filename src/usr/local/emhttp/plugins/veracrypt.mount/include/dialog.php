@@ -49,7 +49,17 @@ $vcm_display = $GLOBALS['display'] ?? [];
     <p id="vcm-dialog-https" class="vcm-warning" hidden>The setting "Require HTTPS to mount" is on, and this
        page was opened over plain HTTP. <a id="vcm-https-link" href="#">Open this page over HTTPS</a> to unlock,
        or use <code>vcmount</code> over SSH.</p>
+    <p id="vcm-pim-warn" class="vcm-warning" hidden>This PIM is very large: unlocking takes many times as long
+       as with VeraCrypt's default, and it is stopped after 3 minutes. Check the PIM, or click
+       <b>Mount anyway</b>.</p>
     <p id="vcm-mount-error" class="vcm-error" hidden></p>
+    <!-- Shown while unlocking: checking a password is slow on purpose. -->
+    <div id="vcm-progress" class="vcm-progress" hidden>
+      <div class="vcm-progress-head"><i class="fa fa-fw fa-circle-o-notch fa-spin"></i>
+        <span id="vcm-progress-text"></span><span id="vcm-progress-time" class="vcm-progress-time"></span></div>
+      <div class="vcm-progress-bar"><span id="vcm-progress-fill"></span></div>
+      <p id="vcm-progress-note" class="vcm-note"></p>
+    </div>
     <div class="vcm-buttons">
       <input type="submit" id="vcm-mount-submit" value="Mount">
       <input type="button" id="vcm-skip" value="Skip" hidden>

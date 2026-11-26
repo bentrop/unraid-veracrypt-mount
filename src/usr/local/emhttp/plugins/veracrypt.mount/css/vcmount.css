@@ -15,6 +15,14 @@
 .vcm-state.unlocked::before { color: #d08a00; }
 
 .vcm-buttons { margin-top: 12px; }
+/* Progress while unlocking; the bar uses the colours of Unraid's buttons. */
+.vcm-progress { margin: 12px 0 4px; }
+.vcm-progress-head { display: flex; align-items: center; gap: 6px; }
+.vcm-progress-time { margin-left: auto; font-variant-numeric: tabular-nums; opacity: .7; }
+.vcm-progress-bar { height: 4px; margin-top: 6px; border-radius: 2px; background: rgba(128, 128, 128, .25); overflow: hidden; }
+.vcm-progress-bar > span { display: block; width: 0; height: 100%; border-radius: 2px;
+                           background: linear-gradient(90deg, #e22828, #ff8c2f); transition: width 1s linear; }
+.vcm-progress .vcm-note { margin: 6px 0 0; }
 
 .vcm-warning { border-left: 4px solid #d08a00; background: rgba(208, 138, 0, .12); padding: 8px 12px; margin: 8px 0; }
 .vcm-error { border-left: 4px solid #c0392b; background: rgba(192, 57, 43, .12); padding: 8px 12px; margin: 8px 0; }
@@ -24,6 +32,8 @@
 .vcm-modal { position: fixed; inset: 0; background: rgba(0, 0, 0, .5); z-index: 10000;
              display: flex; align-items: center; justify-content: center; padding: 16px; }
 .vcm-modal[hidden] { display: none; }
+/* Unraid styles labels with a display value, which would beat "hidden". */
+.vcm-modal [hidden] { display: none !important; }
 .vcm-box { background: var(--background-color, #fff); color: inherit; border-radius: 6px;
            padding: 16px 20px; width: 100%; max-width: 440px; box-shadow: 0 4px 24px rgba(0, 0, 0, .4); }
 .vcm-box h3 { margin-top: 0; }

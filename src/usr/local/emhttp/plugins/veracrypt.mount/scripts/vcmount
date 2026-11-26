@@ -8,8 +8,8 @@
  *
  * Built so far: list, status, mount, dismount (also forced), for volumes that
  * open with a password; dependents that are single containers; SMB shares and
- * the check for network clients (VOL-7). Not built yet: keyfiles, PIM, hidden
- * volumes, Compose stacks.
+ * the check for network clients (VOL-7); keyfiles, PIM and hidden volumes.
+ * Not built yet: Compose stacks.
  *
  * This program never reads a password. cryptsetup reads it directly from
  * standard input.
@@ -77,6 +77,7 @@ const LOCK_FILE = '/var/run/vcmount.lock';
 
 // Time limits in seconds, so the engine can never hang forever.
 const UNLOCK_TIMEOUT = 180;    // cryptsetup checking a password (slow on purpose)
+const KILL_GRACE = 5;          // seconds between asking a timed-out program to stop and ending it
 const TOOL_TIMEOUT = 60;       // every other program
 
 const USAGE = <<<TEXT
@@ -86,10 +87,9 @@ Usage:
   vcmount mount <name> [--read-only]         unlock and mount a saved volume
   vcmount mount --file <path> --name <name> [--read-only] [--keyfile <path>]...
                 [--pim] [--hidden]           mount without saving
-      The password is read from the terminal or standard input. With a PIM
-      (saved with the volume, or --pim), the PIM is asked for after it; on
-      standard input it is the line after the password. Keyfiles are given by
-      path; --keyfile may be repeated. --hidden opens the hidden volume.
+      You are asked for the password and, with a PIM (saved with the volume,
+      or --pim), for the PIM after it. Keyfiles are given by path, under
+      /mnt/; --keyfile may be repeated. --hidden opens the hidden volume.
   vcmount dismount <name> [--force]          stop the dependents, dismount and lock
   vcmount dismount --all [--force]           the same for every mounted volume
   vcmount dismount --all --array-stop        as the array-stop hook calls it: forced
@@ -120,7 +120,8 @@ Without --force a volume that is still in use stays mounted. With --force the
 programs and containers that hold it open are ended, then it is dismounted.
 Add --json to any command for machine-readable output.
 The password is read from standard input by cryptsetup, never from the command line.
-Just run the command: you will be asked for the password, and it is not shown.
+Just run the command: you will be asked for the password (and the PIM), and
+neither is shown.
 Never put it on the command line (no "echo password | vcmount ..."): the shell
 would keep it in its history.
 TEXT;
@@ -240,7 +241,7 @@ function read_keyfiles(string $volume, $list): array
     }
     $paths = [];
     foreach ($list as $path) {
-        if (!is_string($path) || $path === '' || $path[0] !== '/' || strlen($path) > 4096
+        if (!is_string($path) || !str_starts_with($path, '/mnt/') || strlen($path) > 4096
             || preg_match('/[\x00-\x1f]/', $path)) {
             throw $fault;
         }
@@ -250,16 +251,18 @@ function read_keyfiles(string $volume, $list): array
 }
 
 /**
- * Check that every keyfile exists and is an ordinary, readable file that is not
- * the volume file itself. Returns the resolved paths for cryptsetup.
+ * Check that every keyfile is an ordinary, readable file under /mnt/ (shares,
+ * disks, removable drives) and not the volume file itself. One message for
+ * every refusal, so the answer does not tell which files exist elsewhere (SEC-3).
+ * Returns the resolved paths for cryptsetup.
  */
 function check_keyfiles(array $keyfiles, string $volume_file): array
 {
     $resolved = [];
     foreach ($keyfiles as $path) {
         $real = realpath($path);
-        if ($real === false || !is_file($real) || !is_readable($real)) {
-            throw new Fail("The keyfile $path does not exist or cannot be read. If it is on a removable drive, connect it first.", CODE_USAGE);
+        if ($real === false || !str_starts_with($real, '/mnt/') || !is_file($real) || !is_readable($real)) {
+            throw new Fail("The keyfile $path cannot be used: it must be a readable file under /mnt/. If it is on a removable drive, connect it first.", CODE_USAGE);
         }
         if ($real === $volume_file) {
             throw new Fail('The volume file cannot be its own keyfile.', CODE_USAGE);
@@ -685,6 +688,17 @@ function run(array $command, int $timeout, $stdin = null, bool $show_errors = fa
     }
     foreach ($open as $pipe) {
         fclose($pipe);
+    }
+    if ($timed_out) {
+        // cryptsetup notices SIGTERM only after its current key derivation,
+        // which with a large PIM takes hours. After a short wait, end it.
+        $until = microtime(true) + KILL_GRACE;
+        while (proc_get_status($process)['running'] && microtime(true) < $until) {
+            usleep(100000);
+        }
+        if (proc_get_status($process)['running']) {
+            proc_terminate($process, 9);
+        }
     }
     $code = proc_close($process);
 

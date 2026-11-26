@@ -106,9 +106,9 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
                     return vcm_refuse('Too many keyfiles.');
                 }
                 foreach ($keyfiles as $keyfile) {
-                    if (!is_string($keyfile) || $keyfile === '' || $keyfile[0] !== '/' || strlen($keyfile) > 4096
+                    if (!is_string($keyfile) || !str_starts_with($keyfile, '/mnt/') || strlen($keyfile) > 4096
                         || preg_match('/[\x00-\x1f]/', $keyfile)) {
-                        return vcm_refuse('That is not a valid path to a keyfile.');
+                        return vcm_refuse('A keyfile must be a file under /mnt/.');
                     }
                     $args[] = '--keyfile';
                     $args[] = $keyfile;

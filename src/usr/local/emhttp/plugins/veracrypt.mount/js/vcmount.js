@@ -23,6 +23,10 @@
     var lastTile = null;         // the tile's list as last drawn, to leave it alone when nothing changed
     var mountTarget = null;      // the volume the dialog is for; null = mount once
     var mounting = false;        // a mount request is on its way; a second click is ignored
+    var pimWarned = false;       // the large-PIM warning was shown; the next click mounts
+    var progressTimer = null;    // ticks the unlock progress once a second
+    var UNLOCK_LIMIT = 180;      // seconds; the engine's UNLOCK_TIMEOUT
+    var PIM_WARN = 2000;         // above this a PIM takes over four times VeraCrypt's default (485)
     var dismounting = {};        // volumes this page is dismounting now: shown busy, a second click is ignored
     var mountQueue = [];         // the volumes "Mount all" still has to ask for
     var inQueue = false;         // the dialog is part of "Mount all"
@@ -556,6 +560,9 @@
         $('#vcm-password').prop('disabled', blocked);
         $('#vcm-skip').prop('hidden', !inQueue);
         $('#vcm-mount-submit').prop('disabled', blocked).val('Mount');
+        pimWarned = false;
+        $('#vcm-pim-warn').prop('hidden', true);
+        stopProgress();
         $('#vcm-modal').prop('hidden', false);
         $(blocked ? '#vcm-cancel' : (once ? '#vcm-file' : '#vcm-password')).trigger('focus');
     }
@@ -593,14 +600,39 @@
         nextInQueue();
     }
 
+    /** Show how long unlocking has taken, against the engine's time limit. */
+    function startProgress(withPim) {
+        var start = Date.now();
+        $('#vcm-progress-text').text('Checking the password…');
+        $('#vcm-progress-note').text('This is slow on purpose: it makes guessing passwords slow too.'
+            + (withPim ? ' A PIM makes it slower still.' : '') + ' It is stopped after 3 minutes.');
+        $('#vcm-progress-fill').css('width', '0');
+        $('#vcm-progress').prop('hidden', false);
+        var tick = function () {
+            var s = Math.floor((Date.now() - start) / 1000);
+            $('#vcm-progress-time').text(Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2));
+            $('#vcm-progress-fill').css('width', Math.min(100, s / UNLOCK_LIMIT * 100) + '%');
+            if (s >= UNLOCK_LIMIT) { $('#vcm-progress-text').text('Taking too long, stopping…'); }
+        };
+        tick();
+        progressTimer = setInterval(tick, 1000);
+    }
+
+    function stopProgress() {
+        if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+        $('#vcm-progress').prop('hidden', true);
+    }
+
     function dialogError(text) {
         mounting = false;
+        stopProgress();
         $('#vcm-mount-error').text(text).prop('hidden', false);
         $('#vcm-mount-submit').prop('disabled', false).val('Mount');
     }
 
     function mounted(a) {
         mounting = false;
+        stopProgress();
         closeDialog();
         var notes = [];
         if (a.share_error) { notes.push(esc(a.share_error)); }
@@ -696,6 +728,17 @@
             pimField.trigger('focus');
             return;
         }
+        // A typo such as 739184 for 739 would run into the time limit.
+        if (pim !== '' && Number(pim) > PIM_WARN && !pimWarned) {
+            pimWarned = true;
+            $('#vcm-mount-error').prop('hidden', true);
+            $('#vcm-pim-warn').prop('hidden', false);
+            $('#vcm-mount-submit').val('Mount anyway');
+            pim = null;
+            return;
+        }
+        $('#vcm-pim-warn').prop('hidden', true);
+        var withPim = pim !== '';
         mounting = true;
         data.password = field.val();
         data.no_password = data.password === '' ? '1' : '0';
@@ -705,6 +748,7 @@
         pim = null;
         $('#vcm-mount-error').prop('hidden', true);
         $('#vcm-mount-submit').prop('disabled', true).val('Unlocking…');
+        startProgress(withPim);
 
         var name = data.name;
         act(data).then(function (a) {
@@ -1172,6 +1216,13 @@
     $(function () {
         // The password form first (review H1): it must never be left to the browser.
         $('#vcm-mount-form').on('submit', submitMount);
+        // A changed PIM is checked again.
+        $('#vcm-pim').on('input', function () {
+            if (!pimWarned) { return; }
+            pimWarned = false;
+            $('#vcm-pim-warn').prop('hidden', true);
+            $('#vcm-mount-submit').val('Mount');
+        });
         $('#vcm-http-warning').prop('hidden', !overHttp);
 
         // The list and the dialogs.
@@ -1223,7 +1274,7 @@
         $('#e-keyfile-add').on('click', function () {
             var path = $.trim($('#e-keyfile').val());
             if (!path) { return; }
-            if (path.charAt(0) !== '/') { editError('A keyfile path starts with /.'); return; }
+            if (path.indexOf('/mnt/') !== 0) { editError('A keyfile must be a file under /mnt/.'); return; }
             if (keyfilePaths().indexOf(path) < 0) {
                 if (keyfilePaths().length >= 8) { editError('At most 8 keyfiles.'); return; }
                 $('#e-keyfiles').append(keyfileItem(path));

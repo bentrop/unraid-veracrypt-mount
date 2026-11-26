@@ -280,3 +280,261 @@ Open checks of section 5, done on Bob the same day (read-only, test volumes only
    (`loop3: detected capacity change from 0 to 102400`).
 7. **Form nesting on Dashboard and Main: passed.** No form on those pages encloses the
    dialog; every form there closes within its own section.
+
+## 8. Second review: PIM, keyfiles and hidden volumes (commit fda9b63)
+
+- **Date:** 2026-11-17
+- **Reviewer:** Claude, in a separate session that wrote none of this code (SEC-9).
+- **Method:** reading the code only. Nothing was run, the server was not contacted,
+  `.secrets/` was not opened, no code was changed. Only this section was added.
+- **Scope:** the PIM and keyfile path from the browser to `cryptsetup`:
+  `include/actions.php` (cases `mount` and `mount-once`), `include/action.php`,
+  `include/dialog.php`, `submitMount` and `openDialog` in `js/vcmount.js`, and in
+  `scripts/vcmount` the functions `parse_args`, `read_keyfiles`, `check_keyfiles`,
+  `do_mount` and `command_mount`. Read as the diff of fda9b63 and as the current files.
+  Sections 1 to 7 were not redone where this commit did not touch the code.
+
+### 8.1 Summary
+
+**Is the PIM path sound? Yes. Is the keyfile path sound? Yes for secrecy, with weaknesses
+that are not leaks.**
+
+- **The PIM never reaches a command line, an environment variable, a file, a log, a
+  notification or the configuration (SEC-1 met).** In the browser it lives in one field,
+  is cleared in the same step it is read, and is sent once in the POST body together with
+  the password. In PHP it is checked as digits only, joined to the password into one
+  string, and written to the engine's standard input. The engine never reads that input
+  and hands it to `cryptsetup`, which takes the PIM from the second line. On the engine's
+  command line there is only the bare word `--pim`, and in the configuration only the
+  fact `"pim": true`. Error texts never repeat the PIM.
+- **Keyfile contents never reach this program.** Only `cryptsetup` reads them. Only the
+  paths are stored, passed and shown, and a path is not a secret (SPEC KEY-3). Paths are
+  shown in the page only as text (`.text()`, `.attr()`), so they cannot inject markup.
+- **No finding is a leak of a password, PIM or keyfile content today.** The ones that
+  matter most (K1 to K3) are about what a keyfile path can be made to touch, what the
+  stored paths tell a thief, and a help text that invites a leak.
+
+| SPEC item | Result |
+|---|---|
+| SEC-1 no PIM or key content in arguments, environment, files, logs, notifications, configuration | Met. See K3 and K5 for edges around it. |
+| SEC-3 no user input in a shell command; paths validated and resolved | Met for shell use. Resolved yes; limited to a safe area no (K1). |
+| SEC-4 nothing secret in the configuration | Met. It holds keyfile paths and the flags `pim` and `hidden`, see K2. |
+| SEC-7 never opens what it was not asked to | Met for volumes. Keyfile paths are not limited (K1). |
+| PRIV-2 "mount once" leaves nothing identifying | Met for the plugin's log. The keyfile path joins the file path in the process list (K5). |
+
+### 8.2 Findings, most severe first
+
+No finding is rated high. None blocks a release for secrecy's sake; K1 to K3 are worth
+doing before the keyfile feature is advertised.
+
+#### K1. Medium-low: a keyfile path may point anywhere, including files that block or are not keyfiles
+
+- **Where:** `actions.php` (`mount-once`, the `keyfiles` loop: only "starts with `/`, at
+  most 4096 bytes, no control characters"); `scripts/vcmount` `read_keyfiles` (same
+  rules) and `check_keyfiles` (`realpath`, `is_file`, `is_readable`, not the volume file).
+  The picker in the page starts at `/mnt/`, but the server does not enforce that.
+- **What could go wrong:**
+  1. *Existence oracle.* The message "The keyfile <path> does not exist or cannot be
+     read" against a different outcome for a readable file tells a user of the page
+     whether any path on the server exists as a readable regular file (for example under
+     `/boot` or `/root`). The content stays hidden; only existence leaks. The page is
+     reachable only after Unraid's login and with the CSRF token, and that user is
+     effectively root anyway, so this is low.
+  2. *Blocking files.* `is_file` is true for many files in `/proc` and `/sys` that never
+     end or block when read (for example `/proc/kmsg`). `cryptsetup` would then wait
+     until the engine's `UNLOCK_TIMEOUT` stops it, while the engine holds its lock, so
+     mounts and dismounts of other volumes wait too. Whether `cryptsetup` stops reading
+     such a file early was **not verified**.
+  3. *Swap after the check.* `check_keyfiles` resolves the path and `cryptsetup` opens
+     the resolved path a moment later. Whoever can replace the file in that moment (needs
+     write access to its folder, so another local user) changes which file is used. No
+     secret leaks; the unlock merely fails or uses another file. Accepted.
+- **How likely:** low; needs a logged-in user acting against their own server.
+- **Suggested fix:** SEC-3 says paths are "validated and resolved before use". Make the
+  check say where a keyfile may be: after `realpath`, require the result to be below
+  `/mnt/` (where removable drives, shares and disks are), and refuse everything else.
+  Give one message for "does not exist", "cannot be read" and "not allowed here" so the
+  answer is not an oracle. Apply the same rule to `--file` in a later change.
+
+#### K2. Medium-low: stored keyfile paths and the hidden flag describe the volume's protection to anyone who gets the flash backup
+
+- **Where:** `volume_for_file` (writes `keyfiles`, `pim`, `hidden` into `volumes.json` on
+  the flash); `describe` (the `list` answer includes them); the mount dialog
+  (`#vcm-keyfile-note`: "Keyfile: /mnt/..., Opens the hidden volume").
+- **What could go wrong:**
+  1. A volume that needs **only** a keyfile (password empty) and whose keyfile is on the
+     same server (the path is under `/mnt/user` or `/mnt/disk*`) is, to anyone holding the
+     flash backup (which Unraid copies, also to the cloud with Unraid Connect, KEY-5) and
+     the array disks, unlockable without knowing anything. The configuration names
+     exactly which file to use. Against that thief the volume is no better protected than
+     an unencrypted one. Nothing in the page says so.
+  2. A saved volume with `"hidden": true` states in plain text that the file contains a
+     hidden volume. That removes the *plausible deniability* (being able to claim there is
+     no hidden volume) that VeraCrypt's hidden volumes are built for. "Mount a file once"
+     does not have this problem, because it saves nothing (PRIV-2).
+- **How likely:** (1) depends on how people choose keyfiles; (2) certain whenever the
+  "hidden" box is ticked on a saved volume. **How bad:** medium for the owner's intent,
+  zero for the password path.
+- **Suggested fix:** (1) in the edit panel, when a keyfile lies on the array and the
+  volume has no other secret, say in one sentence what a keyfile on the same server does
+  and does not protect against (KEY-4 asks for exactly this kind of wording). (2) next to
+  the "hidden volume" switch: "A saved volume records that it contains a hidden volume.
+  Use *Mount a file once* if nobody should be able to tell." Both are text changes.
+
+#### K3. Low-medium: the help text now invites piping a password and PIM into the command (H6 again)
+
+- **Where:** `scripts/vcmount`, help text added by fda9b63: "The password is read from the
+  terminal or standard input ... on standard input it is the line after the password."
+- **What could go wrong:** review H6 removed the invitation to `echo password | vcmount`.
+  This text describes piping again, now for two secrets. Someone reading it types
+  `printf` or `echo` with the password and PIM piped into `vcmount mount ...` over SSH,
+  and both land in root's shell history and briefly in the process list (RAM only, gone at
+  reboot, but readable by root meanwhile).
+- **How likely:** low. **How bad:** medium for whoever does it.
+- **Suggested fix:** replace the sentence with "Just run the command; you are asked for
+  the password and, if needed, the PIM. Do not put them on the command line or pipe them
+  in." How the web page uses standard input belongs in DESIGN-engine, not in the help.
+
+#### K4. Low: the server does not enforce what the page asks for (PIM required, empty password)
+
+- **Where:** `actions.php` `mount`: `no_password=1` lifts the "Enter the password" check
+  for **any** `mount` of a saved volume; the "keyfile required" rule
+  (`$password === '' && $keyfiles === []`) sits only in the `mount-once` branch. "Enter
+  the PIM" for a saved volume that has one is checked only in the page.
+- **What could go wrong:** a request that is not from the page (or a stale page) can send
+  an empty password for a saved volume without keyfiles; the engine hands an empty line
+  to `cryptsetup`, which fails as "wrong password". A saved volume that asks for a PIM can
+  be sent no PIM: `cryptsetup` then finds the end of its input where the second line
+  should be; the outcome was not tested. In the other direction, a PIM sent for a volume
+  that does not ask for one is written to standard input but never read, and silently
+  ignored. None of this leaks anything; the first is a failed attempt, the others give
+  confusing answers.
+- **Suggested fix:** let the engine, which knows the saved volume, refuse with a clear
+  message ("this volume needs a PIM", "needs a password") before it starts `cryptsetup`,
+  and let PHP accept `no_password` only together with keyfiles.
+
+#### K5. Low: keyfile paths are on the command lines while a "mount once" runs
+
+- **Where:** `actions.php` (`--keyfile <path>` in the engine's arguments); `do_mount`
+  (`--key-file <path>` in the `cryptsetup` arguments).
+- **What could go wrong:** `ps` or `/proc/<pid>/cmdline` shows the path to anyone who can
+  list processes, for as long as the engine runs. The same holds already for the volume
+  file path (review H4). Over SSH, `vcmount mount --file ... --keyfile ...` also stays in
+  root's shell history. The plugin's log stays empty (PRIV-2 met for the log). SEC-1 is
+  not broken: a path is not a secret.
+- **Suggested fix:** document it with H4 under PRIV-4: "the paths of the volume file and
+  keyfiles are visible in the process list while mounting".
+
+#### K6. Low: the PIM field may confuse password managers (browser check needed)
+
+- **Where:** `dialog.php` (`#vcm-pim` is `type="password"` next to `#vcm-password` in the
+  same form, `autocomplete="off"`).
+- **What could go wrong:** two password fields in one form look to many browsers like a
+  "current and new password" pair. The browser may offer to fill the stored password into
+  the PIM field or to save the PIM as the password. Section 7, check 5 passed with **one**
+  field and was not repeated for two. A password filled into the PIM field is rejected by
+  the page's own check (digits only) and never sent, so the worst case is a wrong entry in
+  the user's own password manager.
+- **Suggested fix:** open check 1 below. If it misbehaves, use
+  `autocomplete="one-time-code"` or a text field masked with CSS instead of
+  `type="password"`.
+
+#### K7. Informational
+
+- The mismatch message "wrong password, PIM or keyfile" is good: it does not say which
+  part is wrong. It names only what the request or the saved volume already uses.
+- "no hidden volume inside" appears only when the request asked for the hidden volume,
+  so it reveals nothing about a volume opened as an ordinary one.
+- A hidden volume opened without hidden-volume protection can be damaged by writing to
+  the outer volume (VOL-4, documented; the read-only switch is the safeguard).
+- KEY-3's automatic mount of a volume whose keyfile is present at array start is **not
+  built yet** (no such path was found in `scripts/vcmount`). When it is, it needs its own
+  review: standard input must be empty, volumes that need a password or a PIM must be
+  excluded, and a log line for a failed attempt must not contain the keyfile path.
+- Whether `cryptsetup` shows the PIM while it is typed on a terminal was **not
+  verified**; it should not.
+
+### 8.3 What I checked and found in order
+
+- **Browser, `submitMount` and `openDialog`.** The PIM is read once, trimmed, matched
+  against `^[1-9][0-9]{0,8}$`, put into the request data and the field emptied at once;
+  the script's copies are set to `null` after the request is started (as for the
+  password). Validation errors return **before** anything is sent, with fixed texts that
+  do not repeat the value. `openDialog` and `closeDialog` clear both fields, so a PIM does
+  not survive a cancel or a wrong answer. After a lost answer `settle` still asks only
+  "is something running?"; the PIM is never sent twice. Nothing is written to browser
+  storage or the console (no `console.*`, `localStorage` or `sessionStorage` in the
+  file). Keyfile paths appear only through `.text()` and `.attr()`; the error line uses
+  `.text()`; the info dialog uses `esc()`.
+- **`dialog.php`.** The PIM field has no `name`, so even the H1 fallback (a plain form
+  submit, now `method="post"` to `about:blank`) would not carry it. The keyfile fields
+  have no `name` either. `required` was removed from the password field; the empty case is
+  handled in the script and, for "mount once", on the server.
+- **`actions.php`.** `pim` must be a string of digits (`\A...\z`, so no trailing line
+  break): the PIM cannot add an input line. The password check for NUL, CR and LF still
+  runs before the join, so the password cannot contain the line break that would split
+  the two. `$password` and `$pim` are unset after the join, and the joined string goes
+  on as `#[\SensitiveParameter]`; `vcm_handle` still marks `$post` (and so the PIM)
+  sensitive. Non-string keyfile entries, nested arrays and more than 8 entries are
+  refused. `keyfiles`, `hidden` and `pim` are ignored for a saved volume (it uses its
+  stored settings). The engine is still started from a list of arguments without a shell,
+  and its error output is still discarded.
+- **`scripts/vcmount`.** `--pim` and `--hidden` are flags; `--keyfile` takes the next
+  argument as a value. A value that starts with `--` is taken as a path and then fails the
+  "starts with `/`" rule. Keyfile paths follow `--key-file` as separate arguments, after
+  `realpath`, so a path cannot become an option; no argument list is built from a string
+  and no shell runs. `cryptsetup` gets the engine's standard input and the engine reads
+  none of it; every other program started by the engine gets `/dev/null`. In the mount
+  path no `log_event` or notification contains a PIM or a keyfile path, and for "mount
+  once" nothing is logged. `describe` publishes keyfile paths and the *fact* of a PIM,
+  never a PIM. The unlock error is built from fixed words.
+- **Configuration.** `volume_for_file` writes `pim: true` and `keyfiles` (paths) only;
+  `read_keyfiles` limits the count (8), length (4096) and characters of stored paths and
+  removes duplicates. The plugin never reads a keyfile's content. SEC-4 holds.
+- **Tests recorded in SPEC section 10.** PIM and keyfile through standard input and
+  `--key-file` as described; a wrong PIM and a missing keyfile gave code 2 with the
+  generic message. Not tested yet: a keyfile without a password (the page and PHP now
+  allow an empty password there, handing an empty first line to `cryptsetup`) and a
+  hidden volume.
+
+### 8.4 What I could not verify (open checks; read-only or on throwaway volumes)
+
+1. **Browser (K6).** On the owner's browser and password manager: does the dialog still
+   offer nothing to save after a mount with a PIM, and is a stored password not filled
+   into the PIM field?
+2. **Keyfile without a password.** Does an empty first line on standard input unlock a
+   volume that has only a keyfile, and what happens with no input at all? With a PIM and
+   no password the input is an empty line followed by the PIM.
+3. **Blocking keyfile (K1).** Whether `cryptsetup` returns for a keyfile such as
+   `/proc/kmsg` or only at the engine's time limit. Needs the owner's go-ahead: it holds
+   the engine lock for that time.
+4. **Logs.** Repeat `scripts/logcheck.sh` after one mount **with a PIM** (right and wrong
+   one), to show it is nowhere under `/var/log` and `/tmp`, as was done for the password.
+5. **`cryptsetup` and the PIM.** That 2.8.8 never prints the PIM, also on errors (the
+   recorded tests covered success and the exit code for a wrong PIM only).
+6. **Hidden volume.** Not testable until a throwaway volume with a hidden volume exists;
+   `--tcrypt-hidden` and its error text were only read.
+
+### 8.5 Recommendation
+
+The secret path for PIM and keyfiles is sound and can be released once checks 1 and 4
+of section 8.4 pass. Before that, do the two text changes (K2, K3), which cost nothing,
+and decide on K1 (the folder limit for keyfiles), the only one that touches code. K4 to
+K6 can follow in a later version.
+
+### 8.6 Follow-up (same day)
+
+- **K1 fixed:** keyfiles must lie under `/mnt/`, checked on the stored path, in PHP,
+  in the page and after `realpath` in the engine. Every refusal gives the same message.
+- **K2 fixed (text):** the edit panel says what a keyfile on the same server does not
+  protect against, and that a saved volume reveals its hidden volume; the README says
+  the same.
+- **K3 fixed:** the help no longer describes standard input; it says you are asked.
+- **K5 documented** under PRIV-4 and in the README.
+- **K4 open** for a later version.
+- **Checks of section 8.4, 2026-11-26:** 1 (browser, K6) passed: nothing offered to
+  save, nothing filled into the PIM field. 4 (logs) passed for a PIM typed into the page:
+  a wrong PIM, 739184, appears nowhere under `/var/log` and `/tmp`. 3 (blocking work)
+  showed a related fault: cryptsetup does not stop on SIGTERM during a long key
+  derivation, so a time limit did not end it; the engine now ends it 5 seconds later.
+  2, 5 and 6 remain open.

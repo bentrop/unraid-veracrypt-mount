@@ -100,7 +100,12 @@ reinstall picks it up again.
 - **Traces the plugin cannot prevent:** a container's settings stored outside the
   volume, recent-file lists and thumbnails on Windows computers that used the share,
   activity-logging plugins that record when the volume file is opened, and the shell
-  history if you use `vcmount` over SSH with a file path.
+  history if you use `vcmount` over SSH with a file path, and the paths of the volume
+  file and its keyfiles in the process list for the moment a volume is being mounted.
+- **Keyfiles** must lie under `/mnt/` (a share, disk or removable drive). A keyfile kept
+  on the same server does not protect against someone who takes the whole server.
+- **Hidden volumes:** a saved volume records that its file holds a hidden volume. Use
+  **Mount a file once** if nobody should be able to tell.
 
 ## Development
 

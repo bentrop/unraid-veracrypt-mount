@@ -101,13 +101,18 @@ $vcm = '/plugins/veracrypt.mount';
                    data-pickroot="/mnt/" data-pickcloseonfile="true">
             <input type="button" id="e-keyfile-add" value="Add keyfile">
             <span class="vcm-note">Only the path is saved, never the file's content. A keyfile on a
-              removable drive must be connected when you mount.</span></dd>
+              removable drive must be connected when you mount. A keyfile kept on this server's shares
+              or disks does not protect against someone who takes the whole server: keep it on a
+              removable drive, or use a password as well.</span></dd>
         <dt>PIM</dt>
         <dd><label class="vcm-check"><input type="checkbox" id="e-pim"> Ask for a PIM when mounting.
             The PIM itself is never saved.</label></dd>
         <dt>Hidden volume</dt>
         <dd><label class="vcm-check"><input type="checkbox" id="e-hidden"> Open the hidden volume inside
-            this file, with the hidden volume's password.</label></dd>
+            this file, with the hidden volume's password.</label>
+            <span class="vcm-note">This setting is saved on the flash drive, so it shows that the file
+              holds a hidden volume. If nobody should be able to tell, use <b>Mount a file once</b>
+              instead.</span></dd>
       </dl>
       <p class="vcm-warning" id="e-hidden-warn">If this file holds a hidden volume, mounting the outer
          volume read-write can overwrite and destroy the hidden one: Linux has no protection for it.

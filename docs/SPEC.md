@@ -259,6 +259,15 @@ Nothing needs to be installed on the server.
   without HTTPS switch it off once on the Settings tab, and then unlocking over plain
   HTTP works with a visible warning. An existing settings file keeps its saved choice.
 - **UI-6 (Agreed)** The owner reviews mockups before any UI is built.
+- **UI-7 (Agreed, 2026-11-26)** While unlocking, the mount dialog shows the time taken
+  against the engine's limit of 3 minutes, with a short note on why unlocking is slow.
+  A PIM above 2,000 (over four times VeraCrypt's default effort) is sent only after a
+  warning and a second click; the warning does not show the PIM.
+- **UI-8 (Proposed, 2026-11-26)** Cancel ends a running unlock: the engine notes
+  cryptsetup's process number in `/var/run` while it checks the password, and a new
+  command `vcmount cancel-unlock` ends that process after checking it is a cryptsetup
+  unlock. Until then Cancel does nothing while unlocking. For after the next release,
+  with its own review.
 
 ### 5.8 Command-line tool
 
@@ -328,7 +337,9 @@ The design is in `docs/DESIGN-engine.md`.
   Added after the review of 2026-11-17 (`docs/REVIEW-secrets.md`, H4, H5): "mount once"
   over SSH leaves the volume file's path in root's shell history (in RAM, gone after a
   reboot) and briefly in the process list, so use the web page for volumes that must
-  leave no trace; browsers may ignore "do not save" on password fields and still offer
+  leave no trace. Added after the second review (K5): while a volume is being mounted,
+  the paths of its file and keyfiles are visible in the process list, also from the
+  web page; browsers may ignore "do not save" on password fields and still offer
   to save a "mount once" password.
 
 ## 8. Known limits and accepted risks
@@ -708,6 +719,18 @@ call `include/actions.php` the way the web page will, without a browser.
   the keyfile and a PIM field, refused a wrong PIM and mounted with the right one;
   "Mount a file once" with keyfile and PIM mounted and dismounted; an ordinary volume
   mounted as before, without a PIM field. Passed.
+- After the second security review (2026-11-26, Unraid 7.4.1, files copied with
+  `scripts/deployweb.sh`, by the owner through "Mount a file once"): a keyfile
+  `/boot/config/go` was refused with "A keyfile must be a file under /mnt/"; the right
+  PIM mounted. The browser offered to save nothing and filled nothing into the PIM field
+  (K6). Over plain HTTP with "Require HTTPS" on, the PIM field showed although the
+  password field was hidden (Unraid's label style beat `hidden`): fixed in the style
+  sheet. **A wrong, very large PIM (739184) found a bug:** cryptsetup ignores SIGTERM
+  until its current key derivation ends (hours with that PIM), so the engine's 3-minute
+  limit did not stop it, the page's 5-minute limit ended the engine instead, and
+  cryptsetup ran on alone (ended by hand with the owner's OK). Fixed: `run()` now ends a
+  program 5 seconds after asking it to stop. Retried with the fix: about 4 minutes later
+  no cryptsetup was left on Bob. A search of `/var/log` and `/tmp` for 739184 found it nowhere.
 
 **Engine tests (2026-11-15, all passed, on `throwaway-ntfs`, run with
 `scripts/enginetest.sh`).**
