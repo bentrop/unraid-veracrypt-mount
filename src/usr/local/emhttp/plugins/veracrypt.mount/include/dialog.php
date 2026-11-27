@@ -46,8 +46,8 @@ $vcm_display = $GLOBALS['display'] ?? [];
         <!-- The PIM is sent with the password and goes the same way (SEC-1). -->
         <div class="vcm-opt">
           <label class="vcm-check vcm-once-only"><input type="checkbox" id="vcm-use-pim"> Use PIM</label>
-          <span class="vcm-saved-only">PIM</span>
-          <input type="password" id="vcm-pim" inputmode="numeric" maxlength="9" autocomplete="off" placeholder="PIM">
+          <label for="vcm-pim" class="vcm-saved-only">PIM</label>
+          <input type="password" id="vcm-pim" inputmode="numeric" maxlength="9" autocomplete="off">
         </div>
         <label class="vcm-check vcm-once-only"><input type="checkbox" id="vcm-use-keyfiles"> Use keyfiles</label>
         <div id="vcm-keyfiles-box" class="vcm-sub vcm-once-only">

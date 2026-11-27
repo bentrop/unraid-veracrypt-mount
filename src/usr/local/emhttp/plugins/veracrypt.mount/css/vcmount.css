@@ -38,6 +38,10 @@
 .vcm-box .vcm-opts { grid-column: 2; display: flex; flex-direction: column; gap: 8px; }
 .vcm-box .vcm-opt { display: flex; align-items: center; gap: 10px; }
 .vcm-box .vcm-opt input[type=password] { width: 9em; flex: none; }
+/* A saved volume's PIM is one more row of the grid, its label beside it as the
+   password's. */
+.vcm-box .vcm-opts.vcm-opts-saved, .vcm-box .vcm-opts-saved .vcm-opt { display: contents; }
+.vcm-box .vcm-opts-saved #vcm-pim { justify-self: start; }
 .vcm-box .vcm-sub { margin: -2px 0 2px 24px; }
 .vcm-box .vcm-keyfile { max-width: none; }
 

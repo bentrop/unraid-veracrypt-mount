@@ -753,12 +753,13 @@
         var blocked = passwordBlocked();
         mountTarget = name;
         var once = name === null;
-        $('#vcm-mount-title').text(once ? 'Mount a file once' : 'Mount ' + name);
-        $('#vcm-user').val(once ? '' : 'veracrypt:' + name);
-        $('#vcm-password').val('').attr('autocomplete', once ? 'off' : 'current-password');
         // KEY-2: what this volume needs besides the password.
         var v = null;
         lastVolumes.forEach(function (x) { if (x.name === name) { v = x; } });
+        // The name as the lists show it.
+        $('#vcm-mount-title').text(once ? 'Mount a file once' : 'Mount ' + ((v && v.display_name) || name));
+        $('#vcm-user').val(once ? '' : 'veracrypt:' + name);
+        $('#vcm-password').val('').attr('autocomplete', once ? 'off' : 'current-password');
         var keyfiles = (v && v.keyfiles) || [];
         // Extras: for "Mount a file once" four boxes, each showing its field
         // when ticked; for a saved volume only its PIM field, if it has one.
@@ -766,6 +767,7 @@
         $('#vcm-hidden, #vcm-read-only, #vcm-use-pim, #vcm-use-keyfiles').prop('checked', false);
         $('#vcm-opts .vcm-once-only').prop('hidden', !once);
         $('#vcm-opts .vcm-saved-only').prop('hidden', once);
+        $('#vcm-opts').toggleClass('vcm-opts-saved', !once);
         $('#vcm-keyfiles-box').prop('hidden', true);
         $('#vcm-keyfiles').empty();
         if (once) { addKeyfileRow('', '#vcm-keyfiles'); }

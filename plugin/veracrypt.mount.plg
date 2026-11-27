@@ -97,6 +97,10 @@ fi
 for old in &flash;/&name;-*.txz; do
   [ -e "$old" ] &amp;&amp; [ "$(basename "$old")" != "&package;" ] &amp;&amp; rm -f "$old"
 done
+# Unraid keeps a favourite mark inside the .page file, which the new package
+# just replaced; put it back from /boot/config/favorites.cfg (only read), as
+# Unraid does at boot.
+[ -x /usr/local/emhttp/plugins/dynamix/scripts/restore_favorites ] &amp;&amp; /usr/local/emhttp/plugins/dynamix/scripts/restore_favorites
 # Status files of older versions, now in /var/run/vcmount/ (audit S12).
 rm -f /var/run/vcmount.lock /var/run/vcmount.cancel /var/run/vcmount.unlocking /var/run/vcmount.idle /var/run/vcmount.idle-error /var/run/vcmount.stray
 echo ""

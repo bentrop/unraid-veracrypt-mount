@@ -14,6 +14,24 @@ Windows, just not on both at once.
 > its copy cannot be mounted at the same time (they share a file system ID); the plugin
 > says so and refuses the second. Btrfs copies can.
 
+## Screenshots
+
+The Volumes tab: shares, dependent containers, usage and the time left before an idle
+volume is locked.
+
+![The Volumes tab](docs/images/volumes-tab.png)
+
+The Dashboard tile and the section on the Main page, each with a lock that mounts and
+dismounts.
+
+![The Dashboard tile](docs/images/dashboard-tile.png)
+
+![The section on the Main page](docs/images/main-page.png)
+
+Mounting a volume that needs a PIM and a keyfile.
+
+![The mount dialog](docs/images/mount-dialog.png)
+
 ## Features
 
 - **Volumes tab** (Settings › User Utilities › VeraCrypt Mount): your saved volumes

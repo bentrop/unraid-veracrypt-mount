@@ -5,6 +5,7 @@
 # Usage:    bash scripts/deployweb.sh install
 #           bash scripts/deployweb.sh install-test
 #           bash scripts/deployweb.sh install-reset
+#           bash scripts/deployweb.sh install-demo
 #           bash scripts/deployweb.sh remove
 # Preview:  DRY_RUN=1 bash scripts/deployweb.sh <install|remove>
 #
@@ -19,7 +20,8 @@
 #      tests/volumes.test.json; while it is there, action.php makes the engine
 #      read it instead of the settings on the flash drive). An existing one is
 #      kept, so volumes added in the page survive a reinstall. install-reset
-#      replaces it with the test copy.
+#      replaces it with the test copy. install-demo replaces it with a copy of
+#      tests/volumes.demo.json, the demo volumes for screenshots.
 #   3. makes the engine executable, lists what is there and lets PHP check the
 #      three PHP files for syntax errors (they are not run)
 #   4. runs Unraid's restore_favorites: the copied .page files lose the
@@ -48,6 +50,8 @@ TEST_DIR="$(stage_tests "$REPO/tests")" || exit 1   # with the test user filled 
 WEB_FILES="VeraCryptMount.page VeraCryptMountVolumes.page VeraCryptMountSettings.page VeraCryptMountDashboard.page VeraCryptMountMain.page include/action.php include/actions.php include/dialog.php js/vcmount.js js/vcsettings.js css/vcmount.css"
 ENGINE="scripts/vcmount"
 DEV_CONFIG="scripts/volumes.dev.json"
+CONFIG_SRC="volumes.test.json"
+[ "${1:-}" = install-demo ] && CONFIG_SRC="volumes.demo.json"
 
 remote_files() {
     local out=""
@@ -57,10 +61,10 @@ remote_files() {
 
 action="${1:-}"
 case "$action" in
-    install|install-test|install-reset)
+    install|install-test|install-reset|install-demo)
         if [ "$action" = install ]; then
             keep="rm -f $PLUGIN_DIR/$DEV_CONFIG.new $PLUGIN_DIR/$DEV_CONFIG && echo 'Uses the saved volumes (no test list)'"
-        elif [ "$action" = install-reset ]; then
+        elif [ "$action" = install-reset ] || [ "$action" = install-demo ]; then
             keep="mv -f $PLUGIN_DIR/$DEV_CONFIG.new $PLUGIN_DIR/$DEV_CONFIG"
         else
             keep="if [ -e $PLUGIN_DIR/$DEV_CONFIG ]; then rm -f $PLUGIN_DIR/$DEV_CONFIG.new; echo 'Kept the existing $DEV_CONFIG'; else mv $PLUGIN_DIR/$DEV_CONFIG.new $PLUGIN_DIR/$DEV_CONFIG; fi"
@@ -78,7 +82,7 @@ case "$action" in
         remote="$remote && rmdir --ignore-fail-on-non-empty $PLUGIN_DIR/include $PLUGIN_DIR/js $PLUGIN_DIR/css $PLUGIN_DIR/scripts $PLUGIN_DIR"
         ;;
     *)
-        echo "Usage: bash scripts/deployweb.sh <install|install-test|install-reset|remove>"
+        echo "Usage: bash scripts/deployweb.sh <install|install-test|install-reset|install-demo|remove>"
         exit 1
         ;;
 esac
@@ -100,7 +104,7 @@ if [ "$action" != remove ]; then
     # One tar stream through the SSH connection. The test configuration is
     # renamed to scripts/volumes.dev.json.new on the way.
     tar -cf - -C "$SOURCE_DIR" $WEB_FILES $ENGINE \
-        -C "$TEST_DIR" --transform "s|^volumes\.test\.json\$|$DEV_CONFIG.new|" volumes.test.json \
+        -C "$TEST_DIR" --transform "s|^$CONFIG_SRC\$|$DEV_CONFIG.new|" "$CONFIG_SRC" \
         | "$SSH" -o BatchMode=yes "$HOST" "$remote" || true
 else
     "$SSH" -n -o BatchMode=yes "$HOST" "$remote" || true

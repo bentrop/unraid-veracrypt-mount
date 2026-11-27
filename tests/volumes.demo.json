@@ -1,0 +1,41 @@
+{
+    "volumes": [
+        {
+            "name": "documents",
+            "display_name": "Documents",
+            "file": "/mnt/user/data/veracrypt/demo/Documents.hc",
+            "share": { "users": { "@TEST_USER@": "read-write" } }
+        },
+        {
+            "name": "photos",
+            "display_name": "Photos",
+            "file": "/mnt/user/data/veracrypt/demo/Photos.hc",
+            "share": { "export": "hidden", "users": { "@TEST_USER@": "read-write" } },
+            "idle_lock": 15
+        },
+        {
+            "name": "finance",
+            "display_name": "Finance",
+            "file": "/mnt/user/data/veracrypt/demo/Finance.hc",
+            "pim": true,
+            "keyfiles": ["/mnt/user/data/veracrypt/demo/Finance.key"],
+            "idle_lock": 30
+        },
+        {
+            "name": "opencloud",
+            "display_name": "OpenCloud",
+            "file": "/mnt/user/data/veracrypt/demo/OpenCloud.hc",
+            "dependents": [
+                { "container": "opencloud-vc", "grace": 10 },
+                { "container": "collabora-vc", "grace": 10 }
+            ]
+        },
+        {
+            "name": "videos",
+            "display_name": "Videos",
+            "file": "/mnt/user/data/veracrypt/demo/Videos.hc",
+            "read_only": true,
+            "share": { "users": { "@TEST_USER@": "read-only" } }
+        }
+    ]
+}
