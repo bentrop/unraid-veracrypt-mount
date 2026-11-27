@@ -129,7 +129,13 @@ tr.vcm-row span.vcm-col-name { white-space: nowrap; }
 .vcm-tile-icon.unlocked { color: #d08a00; }
 .vcm-tile-icon[role=button] { cursor: pointer; display: inline-block; padding: 4px 4px 4px 0; margin-left: 2px;
                               transition: transform .15s ease-out, color .15s ease-out; transform-origin: left center; }
-.vcm-tile-icon[role=button]:hover, .vcm-tile-icon[role=button]:focus { color: #ff8c2f; transform: scale(1.2) rotate(8deg); outline: none; }
+.vcm-tile-icon[role=button]:hover, .vcm-tile-icon[role=button]:focus { color: #ff8c2f; transform: scale(1.2) rotate(8deg); }
+/* Keep a clear focus outline for keyboard navigation, even with reduced motion (audit B16.10). */
+.vcm-tile-icon[role=button]:focus:not(:focus-visible) { outline: none; }
+/* No tilted outline (it is clipped by the table cell): the icon stays upright,
+   orange, on a light orange patch. */
+.vcm-tile-icon[role=button]:focus-visible { outline: none; transform: none; background-color: rgba(255, 140, 47, .2);
+                                            border-radius: 3px; padding-left: 4px; margin-left: -2px; }
 .vcm-tile-icon[role=button]:active { transform: scale(1.1); }
 @media (prefers-reduced-motion: reduce) {
   .vcm-tile-icon[role=button] { transition: none; }

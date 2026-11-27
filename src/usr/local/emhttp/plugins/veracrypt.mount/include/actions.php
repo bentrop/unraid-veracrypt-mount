@@ -17,8 +17,11 @@
 
 const VCM_ENGINE = '/usr/local/emhttp/plugins/veracrypt.mount/scripts/vcmount';
 
-// The same pattern as the engine's volume names.
+// The same patterns and limits as the engine (audit B17.1).
 const VCM_NAME = '/\A[A-Za-z0-9][A-Za-z0-9_-]{0,31}\z/';
+const VCM_PIM = '/\A[1-9][0-9]{0,8}\z/';
+const VCM_UNLOCK_ID = '/\A[0-9a-f]{16,64}\z/';
+const VCM_MAX_KEYFILES = 8;
 
 // Seconds the engine may take. It stops cryptsetup itself after 180.
 const VCM_TIMEOUT = 300;
@@ -29,6 +32,34 @@ const VCM_KILL_GRACE = 5;
 // The longest password accepted, in bytes: VeraCrypt's own limit
 // (review H7, audit B13), so a longer one gets a clear message instead of "wrong password".
 const VCM_MAX_PASSWORD = 128;
+
+/**
+ * Plain path below /mnt/, mirroring plain_mnt_path() in scripts/vcmount
+ * (audit B17.1): no trailing slash, no "//", no "." or "..", no control bytes.
+ */
+function vcm_plain_mnt_path(string $path): bool
+{
+    return str_starts_with($path, '/mnt/') && strlen($path) <= 4096
+        && !str_ends_with($path, '/') && strpos($path, '//') === false
+        && !preg_match('#/\.\.?(/|\z)#', $path) && !preg_match('/[\x00-\x1f\x7f]/', $path);
+}
+
+/**
+ * Mirror of same_file() in scripts/vcmount: /mnt/user/<share>/x and
+ * /mnt/<disk>/<share>/x count as the same file.
+ */
+function vcm_same_file(string $one, string $two): bool
+{
+    if ($one === $two) {
+        return true;
+    }
+    $pattern = '#\A/mnt/([^/]+)/(.+)\z#';
+    if (!preg_match($pattern, $one, $a) || !preg_match($pattern, $two, $b)) {
+        return false;
+    }
+    $through_user_share = in_array($a[1], ['user', 'user0'], true) || in_array($b[1], ['user', 'user0'], true);
+    return $through_user_share && $a[2] === $b[2];
+}
 
 /**
  * Handle one request.
@@ -62,12 +93,24 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
             break;
         case 'cancel-unlock':
             $args = ['cancel-unlock'];
+            $unlock_id = $post['unlock_id'] ?? '';
+            if (!is_string($unlock_id) || ($unlock_id !== '' && !preg_match(VCM_UNLOCK_ID, $unlock_id))) {
+                return vcm_refuse('That is not a valid unlock identifier.');
+            }
+            if ($unlock_id !== '') {
+                $args[] = '--unlock-id';
+                $args[] = $unlock_id;
+            }
             break;
         case 'status':
             $args = ['status', $name];
             break;
         case 'mount':
         case 'mount-once':
+            $unlock_id = $post['unlock_id'] ?? '';
+            if (!is_string($unlock_id) || ($unlock_id !== '' && !preg_match(VCM_UNLOCK_ID, $unlock_id))) {
+                return vcm_refuse('That is not a valid unlock identifier.');
+            }
             $password = $post['password'] ?? null;
             // VeraCrypt allows a volume with keyfiles and no password. The page
             // says so with no_password=1, only when keyfiles are used.
@@ -87,27 +130,33 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
             // The PIM, if the volume has one: digits only, sent after the
             // password on the engine's standard input (SEC-1), never as an argument.
             $pim = $post['pim'] ?? '';
-            if (!is_string($pim) || ($pim !== '' && !preg_match('/\A[1-9][0-9]{0,8}\z/', $pim))) {
+            if (!is_string($pim) || ($pim !== '' && !preg_match(VCM_PIM, $pim))) {
                 return vcm_refuse('The PIM must be a whole number from 1 upwards, without spaces.');
             }
             if ($action === 'mount') {
-                // What the saved volume needs, so a missing PIM or an empty
-                // password without keyfiles gets a clear answer instead of
-                // "wrong password" after a long unlock (review K4, audit S11).
+                // Mirror the engine's saved-volume rules before starting it,
+                // so a missing or unexpected PIM or an empty password without
+                // keyfiles is refused before the password leaves PHP (review K4,
+                // audit S11, B17.1). The engine checks the same flags again.
                 $status = vcm_run($engine, ['status', $name, '--json'], null);
                 $saved = is_array($status['volume'] ?? null) ? $status['volume'] : null;
                 if ($saved !== null && !empty($saved['pim']) && $pim === '') {
                     return vcm_refuse('This volume asks for a PIM. Enter it.');
                 }
+                if ($saved !== null && empty($saved['pim']) && $pim !== '') {
+                    return vcm_refuse('This volume does not use a PIM.');
+                }
                 if ($saved !== null && $password === '' && ($saved['keyfiles'] ?? []) === []) {
                     return vcm_refuse('Enter the password.');
                 }
-                $args = ['mount', $name];
+                $args = ['mount', $name, $pim !== '' ? '--pim' : '--no-pim'];
+                if ($password === '') {
+                    $args[] = '--no-password';
+                }
             } else {
                 // Mount without saving (VOL-5).
                 $file = $post['file'] ?? null;
-                if (!is_string($file) || !str_starts_with($file, '/mnt/') || strlen($file) > 4096
-                    || preg_match('/[\x00-\x1f]/', $file)) {
+                if (!is_string($file) || !vcm_plain_mnt_path($file)) {
                     return vcm_refuse('That is not a valid path to a volume file.');
                 }
                 $args = ['mount', '--file', $file, '--name', $name];
@@ -121,13 +170,15 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
                     $args[] = '--pim';
                 }
                 $keyfiles = $post['keyfiles'] ?? [];
-                if (!is_array($keyfiles) || count($keyfiles) > 8) {
+                if (!is_array($keyfiles) || count($keyfiles) > VCM_MAX_KEYFILES) {
                     return vcm_refuse('Too many keyfiles.');
                 }
                 foreach ($keyfiles as $keyfile) {
-                    if (!is_string($keyfile) || !str_starts_with($keyfile, '/mnt/') || strlen($keyfile) > 4096
-                        || preg_match('/[\x00-\x1f]/', $keyfile)) {
-                        return vcm_refuse('A keyfile must be a file under /mnt/.');
+                    if (!is_string($keyfile) || !vcm_plain_mnt_path($keyfile)) {
+                        return vcm_refuse('A keyfile must be a plain file path under /mnt/.');
+                    }
+                    if (vcm_same_file($keyfile, $file)) {
+                        return vcm_refuse('The volume file cannot be its own keyfile.');
                     }
                     $args[] = '--keyfile';
                     $args[] = $keyfile;
@@ -135,6 +186,13 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
                 if ($password === '' && $keyfiles === []) {
                     return vcm_refuse('Enter the password.');
                 }
+                if ($password === '') {
+                    $args[] = '--no-password';
+                }
+            }
+            if ($unlock_id !== '') {
+                $args[] = '--unlock-id';
+                $args[] = $unlock_id;
             }
             // The engine refuses this when the setting "require HTTPS" is on (UI-5).
             if (!$https) {

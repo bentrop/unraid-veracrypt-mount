@@ -286,15 +286,17 @@ Nothing needs to be installed on the server.
   A PIM above 2,000 (over four times VeraCrypt's default effort) is sent only after a
   warning and a second click; the warning does not show the PIM.
 - **UI-8 (Agreed, 2026-11-26)** Cancel ends a running unlock. The page only asks:
-  `vcmount cancel-unlock` creates the marker `/var/run/vcmount.cancel`. The mount,
-  which waits for `cryptsetup` anyway, looks for it every half second and ends its own
-  child; no process number is passed around, so it cannot hit another program. The
-  marker is removed before and after every unlock. Cancel after the password was
+  `vcmount cancel-unlock` creates the marker `/var/run/vcmount/cancel`, holding the
+  random ID of the one unlock it is for (review C3). The mount, which waits for
+  `cryptsetup` anyway, looks for it every half second and ends its own child; no
+  process number is passed around, so it cannot hit another program. A cancel for
+  another unlock is ignored, so a late one cannot stop the next unlock, and one sent
+  just before its unlock starts is still honoured. Cancel after the password was
   accepted changes nothing: the mount completes. Ctrl+C, a closed terminal and a stop
   signal (also the page's own time limit) are caught during the password check and end
   cryptsetup the same way; otherwise it would run on alone, since it ignores them until
-  its key derivation ends. While the check runs, `/var/run/vcmount.unlocking` holds its
-  start time (no name, no path). A mount that finds the engine busy says at once what
+  its key derivation ends. While the check runs, `/var/run/vcmount/unlocking` holds its
+  start time and its random ID (no name, no path). A mount that finds the engine busy says at once what
   is running and, for another unlock, offers to stop it, instead of waiting with its
   own timer. Needs a short separate review (SEC-9).
 

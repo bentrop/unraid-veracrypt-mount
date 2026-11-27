@@ -15,7 +15,12 @@
 
     var URL = '/plugins/veracrypt.mount/include/action.php';
     var REFRESH = 5000;          // ask for the list every 5 seconds (U3)
+    // Patterns and limits matching scripts/vcmount and include/actions.php (audit B17.1).
     var NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+    var PIM = /^[1-9][0-9]{0,8}$/;
+    var MAX_PASSWORD = 128;      // bytes, VeraCrypt's own limit
+    var MAX_KEYFILES = 8;
+    var RESERVED_SHARES = ['global', 'homes', 'printers', 'print$', 'ipc$'];
     var overHttp = window.location.protocol === 'http:';
     var httpsRequired = null;    // the setting "require HTTPS", from the list; null = not known yet
 
@@ -24,6 +29,10 @@
     var mountTarget = null;      // the volume the dialog is for; null = mount once
     var mounting = false;        // a mount request is on its way; a second click is ignored
     var cancelling = false;      // Cancel was clicked during an unlock; waiting for the answer
+    var currentUnlockId = '';    // opaque token tying Cancel to this one unlock (review C3)
+    var otherUnlockId = '';      // opaque token of another running unlock, for "Stop that unlock"
+    var modalOpener = null;      // control to return focus to when #vcm-modal closes (audit B16.10)
+    var infoOpener = null;       // control to return focus to when #vcm-info closes (audit B16.10)
     var pimWarned = false;       // the large-PIM warning was shown; the next click mounts
     var progressTimer = null;    // ticks the unlock progress once a second
     var UNLOCK_LIMIT = 180;      // seconds; the engine's UNLOCK_TIMEOUT
@@ -45,6 +54,112 @@
         return String(text === null || text === undefined ? '' : text).replace(/[&<>"']/g, function (c) {
             return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
         });
+    }
+
+    /** UTF-8 byte length, matching PHP's strlen() (audit B13, B17.1). */
+    function utf8Bytes(s) {
+        return window.TextEncoder ? new TextEncoder().encode(s).length : unescape(encodeURIComponent(s)).length;
+    }
+
+    /** Plain path below /mnt/, mirroring plain_mnt_path() in scripts/vcmount (audit B17.1). */
+    function plainMntPath(path) {
+        return path.indexOf('/mnt/') === 0 && utf8Bytes(path) <= 4096
+            && path.charAt(path.length - 1) !== '/' && path.indexOf('//') < 0
+            && !/\/\.\.?(\/|$)/.test(path) && !/[\x00-\x1f\x7f]/.test(path);
+    }
+
+    /** Mirror of same_file() in scripts/vcmount: /mnt/user/<share>/x and /mnt/<disk>/<share>/x match. */
+    function sameFile(one, two) {
+        if (one === two) { return true; }
+        var a = /^\/mnt\/([^/]+)\/(.+)$/.exec(one);
+        var b = /^\/mnt\/([^/]+)\/(.+)$/.exec(two);
+        if (!a || !b) { return false; }
+        var viaUser = a[1] === 'user' || a[1] === 'user0' || b[1] === 'user' || b[1] === 'user0';
+        return viaUser && a[2] === b[2];
+    }
+
+    /** Mirror of valid_mount_at() in scripts/vcmount for a folder inside a share (MNT-2). */
+    function validShareMountAt(path) {
+        return plainMntPath(path) && !/[\\\%]/.test(path) && /^\/mnt\/user\/[^/]+\/[^/]+/.test(path);
+    }
+
+    /** Whole non-negative integer, or NaN for decimals and non-digits. */
+    function wholeInt(val) {
+        var s = $.trim(String(val === null || val === undefined ? '' : val));
+        return /^\d+$/.test(s) ? Number(s) : NaN;
+    }
+
+    /** Opaque 32-hex-character token tying a cancel to this one unlock (review C3). */
+    function makeUnlockId() {
+        var bytes = new Uint8Array(16);
+        if (window.crypto && window.crypto.getRandomValues) {
+            window.crypto.getRandomValues(bytes);
+        } else {
+            for (var i = 0; i < bytes.length; i++) { bytes[i] = Math.floor(Math.random() * 256); }
+        }
+        return Array.prototype.map.call(bytes, function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+    }
+
+    /** Visible, enabled elements inside an open dialog that Tab can reach (audit B16.10). */
+    function focusables(dialog) {
+        return dialog.find('a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]')
+            .filter(function () {
+                if (this.disabled || this.tabIndex < 0) { return false; }
+                return $(this).is(':visible') && !$(this).hasClass('vcm-offscreen');
+            });
+    }
+
+    /** Keep Tab and Shift+Tab cycling inside an open dialog (audit B16.10). */
+    function trapTab(e, dialog) {
+        if (e.key !== 'Tab' || dialog.prop('hidden')) { return; }
+        if ($('.sweet-alert.visible').length) { return; }
+        var list = focusables(dialog);
+        if (!list.length) { e.preventDefault(); return; }
+        var first = list[0], last = list[list.length - 1];
+        if (e.shiftKey) {
+            if (document.activeElement === first || !dialog[0].contains(document.activeElement)) {
+                e.preventDefault();
+                last.focus();
+            }
+        } else {
+            if (document.activeElement === last || !dialog[0].contains(document.activeElement)) {
+                e.preventDefault();
+                first.focus();
+            }
+        }
+    }
+
+    /** Remember the control that opened a dialog, with a fallback if its row redraws. */
+    function captureOpener(el, kind, name) {
+        var node = el || (document.activeElement && document.activeElement !== document.body ? document.activeElement : null);
+        return { el: node, kind: kind, name: name, tag: node ? node.tagName : '' };
+    }
+
+    /** Return keyboard focus to the control that opened a dialog (audit B16.10). */
+    function restoreFocus(opener) {
+        if (!opener) { return; }
+        if (opener.el && document.contains(opener.el) && $(opener.el).is(':visible')) {
+            opener.el.focus();
+            return;
+        }
+        var fallback = null;
+        if (opener.kind === 'once') {
+            fallback = $('#vcm-once:visible')[0];
+        } else if (opener.kind === 'all') {
+            fallback = $('#vcm-mount-all:visible')[0];
+        } else if (opener.kind === 'info' && opener.name) {
+            fallback = $('#vcm-rows .vcm-info:visible').filter(function () {
+                return $(this).attr('data-name') === opener.name;
+            }).first()[0];
+        } else if (opener.kind === 'mount' && opener.name) {
+            var sel = opener.tag === 'I'
+                ? '#vcm-rows i.vcm-tile-icon[role=button]:visible'
+                : '#vcm-rows input.vcm-mount:visible, #vcm-rows input.vcm-dismount:visible';
+            fallback = $(sel).filter(function () {
+                return $(this).attr('data-name') === opener.name;
+            }).first()[0];
+        }
+        if (fallback) { fallback.focus(); }
     }
 
     /** Send one action. Always resolves, with the engine's answer or an error. */
@@ -207,7 +322,7 @@
      * a tooltip that opens the volume's information window.
      */
     function infoIcon(name) {
-        return '<a class="info hand vcm-info" data-name="' + esc(name) + '">' +
+        return '<a href="#" class="info hand vcm-info" data-name="' + esc(name) + '">' +
                '<i class="icon-disk-encrypted icon"></i><span>Volume information</span></a>';
     }
 
@@ -449,15 +564,31 @@
             : '<dt>' + esc(label) + '</dt><dd>' + value + '</dd>';
     }
 
+    function closeInfo() {
+        var box = $('#vcm-info');
+        if (!box.length || box.prop('hidden')) { return; }
+        box.prop('hidden', true);
+        var opener = infoOpener;
+        infoOpener = null;
+        restoreFocus(opener);
+    }
+
     /**
      * Show what "vcmount info" reports about one volume, read-only, in a window
      * in the style of the mount dialog. Built when first needed.
      */
-    function showInfo(name) {
+    function showInfo(name, openerEl) {
+        if (!$('#vcm-info').length || $('#vcm-info').prop('hidden')) {
+            infoOpener = captureOpener(openerEl, 'info', name);
+        }
         var seq = ++infoSeq;
         act({ action: 'info', name: name }).then(function (a) {
             if (seq !== infoSeq) { return; }
-            if (!a.ok) { message('No information', esc(a.error || 'The volume could not be read.'), 'error'); return; }
+            if (!a.ok) {
+                infoOpener = null;
+                message('No information', esc(a.error || 'The volume could not be read.'), 'error');
+                return;
+            }
             var v = a.volume;
             var html = '<dl class="vcm-info-list">' +
                 infoRow('State', esc(v.state) + (v.read_only && v.state === 'mounted' ? ', read-only' : '') +
@@ -504,12 +635,12 @@
 
             var box = $('#vcm-info');
             if (!box.length) {
-                box = $('<div id="vcm-info" class="vcm-modal" hidden><div class="vcm-box vcm-info-box" role="dialog" aria-labelledby="vcm-info-title">' +
+                box = $('<div id="vcm-info" class="vcm-modal" role="dialog" aria-modal="true" aria-labelledby="vcm-info-title" hidden>' +
+                        '<div class="vcm-box vcm-info-box">' +
                         '<h3 id="vcm-info-title"></h3><div id="vcm-info-body"></div>' +
                         '<div class="vcm-buttons"><input type="button" id="vcm-info-close" value="Close"></div></div></div>').appendTo('body');
-                box.on('click', function (e) { if (e.target === this) { box.prop('hidden', true); } });
-                $('#vcm-info-close').on('click', function () { box.prop('hidden', true); });
-                $(document).on('keydown', function (e) { if (e.key === 'Escape') { box.prop('hidden', true); } });
+                box.on('click', function (e) { if (e.target === this) { closeInfo(); } });
+                $('#vcm-info-close').on('click', closeInfo);
             }
             $('#vcm-info-body').off('click').on('click', '.vcm-fix-top', function (e) {
                 e.preventDefault();
@@ -596,9 +727,14 @@
         });
     }
 
-    function openDialog(name, checked) {
+    function openDialog(name, checked, openerEl) {
+        if (!checked && $('#vcm-modal').prop('hidden') && !(inQueue && modalOpener)) {
+            modalOpener = captureOpener(openerEl, inQueue ? 'all' : (name === null ? 'once' : 'mount'), name);
+        }
         busyWatch++;
         checkingHttp = 0;
+        currentUnlockId = '';
+        otherUnlockId = '';
         if (overHttp && !checked) {
             var seq = ++dialogSeq;
             freshHttpsSetting(function () { if (seq === dialogSeq) { openDialog(name, true); } });
@@ -650,15 +786,22 @@
         $(blocked ? '#vcm-cancel' : (once ? '#vcm-file' : '#vcm-password')).trigger('focus');
     }
 
-    function closeDialog() {
+    function closeDialog(keepOpener) {
         if (!mounting) { busyWatch++; }
         if (mounting) { return; }   // not while a mount is on its way
+        currentUnlockId = '';
+        otherUnlockId = '';
         $('#vcm-password, #vcm-pim').val('');
         // "Mount a file once" leaves no trace in the page either (audit S10).
         $('#vcm-file, #vcm-name').val('');
         $('#vcm-keyfiles').empty();
         $('#vcm-modal').prop('hidden', true);
         mountTarget = null;
+        if (!keepOpener) {
+            var opener = modalOpener;
+            modalOpener = null;
+            restoreFocus(opener);
+        }
     }
 
     /** "Mount all" (VOL-6): ask for the next volume in the queue, or finish. */
@@ -668,6 +811,9 @@
             openDialog(mountQueue.shift());
         } else {
             inQueue = false;
+            var opener = modalOpener;
+            modalOpener = null;
+            restoreFocus(opener);
             refresh();
         }
     }
@@ -677,13 +823,14 @@
         inQueue = false;
     }
 
-    function mountAll() {
+    function mountAll(openerEl) {
         mountQueue = lastVolumes.filter(function (v) { return v.saved && v.state === 'locked'; })
                                 .map(function (v) { return v.name; });
         if (!mountQueue.length) {
             message('Nothing to mount', 'Every saved volume is already mounted.', 'info');
             return;
         }
+        modalOpener = captureOpener(openerEl, 'all', null);
         nextInQueue();
     }
 
@@ -723,7 +870,7 @@
         stopQueue();
         $('#vcm-cancel').prop('disabled', true).val('Cancelling…');
         $('#vcm-progress-text').text('Cancelling…');
-        act({ action: 'cancel-unlock' });
+        act(currentUnlockId ? { action: 'cancel-unlock', unlock_id: currentUnlockId } : { action: 'cancel-unlock' });
     }
 
     function clock(s) {
@@ -770,6 +917,8 @@
         // from now on, and an answer for a dialog closed meanwhile is dropped
         // (audit B8).
         mounting = false;
+        currentUnlockId = '';
+        otherUnlockId = '';
         stopProgress();
         $('#vcm-mount-submit').val('Checking…');
         watchBusy(name);
@@ -777,6 +926,7 @@
         act({ action: 'busy' }).then(function (b) {
             if (id !== busyWatch) { return; }
             if (b.ok && b.busy && b.unlocking_for !== null && b.unlocking_for !== undefined) {
+                otherUnlockId = b.unlock_id || '';
                 var left = Math.max(0, UNLOCK_LIMIT + 5 - b.unlocking_for);
                 dialogError('Another volume is still being unlocked (for ' + clock(b.unlocking_for)
                     + '; it stops by itself within about ' + clock(left) + '), so nothing was done. '
@@ -795,8 +945,10 @@
 
     function stopOther() {
         var id = ++busyWatch;   // this answer replaces the quiet check (audit B4)
+        var target = otherUnlockId;
+        otherUnlockId = '';
         $('#vcm-stop-other').prop('disabled', true).val('Stopping…');
-        act({ action: 'cancel-unlock' }).then(function () {
+        act(target ? { action: 'cancel-unlock', unlock_id: target } : { action: 'cancel-unlock' }).then(function () {
             if (id !== busyWatch) { return; }
             var tries = 0;
             (function poll() {
@@ -814,6 +966,7 @@
 
     function dialogError(text) {
         mounting = false;
+        currentUnlockId = '';
         stopProgress();
         $('#vcm-mount-error').text(text).prop('hidden', false);
         $('#vcm-mount-submit').prop('disabled', false).val('Mount');
@@ -824,8 +977,9 @@
         // mount went ahead, as designed (UI-8). Say so instead of staying quiet.
         var late = cancelling;
         mounting = false;
+        currentUnlockId = '';
         stopProgress();
-        closeDialog();
+        closeDialog(inQueue && mountQueue.length > 0);
         var notes = [];
         if (late) {
             notes.push('The password had already been accepted when Cancel arrived, so "' + esc(mountLabel)
@@ -882,6 +1036,7 @@
         // only closes the dialog instead of sending a stray cancel-unlock (audit B4).
         if (lost === 'timeout') {
             mounting = false;
+            currentUnlockId = '';
             stopProgress();
         }
         $('#vcm-mount-submit').val('Checking…');
@@ -954,9 +1109,13 @@
             data.file = $.trim($('#vcm-file').val());
             data.read_only = $('#vcm-read-only').is(':checked') ? '1' : '0';
             data.hidden = $('#vcm-hidden').is(':checked') ? '1' : '0';
-            // Checked here, so a missing field does not cost the typed password.
-            if (data.file.indexOf('/mnt/') !== 0) { dialogError('Choose the volume file, under /mnt/.'); $('#vcm-file').trigger('focus'); return; }
-            if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(data.name)) {
+            // Mirror the engine's rules before reading or clearing the password (audit B17.1).
+            if (!plainMntPath(data.file)) {
+                dialogError('Choose a valid volume file path under /mnt/ (no trailing /, ".." or control characters).');
+                $('#vcm-file').trigger('focus');
+                return;
+            }
+            if (!NAME.test(data.name)) {
                 dialogError('Enter a name: letters, digits, - and _, starting with a letter or digit.');
                 $('#vcm-name').trigger('focus');
                 return;
@@ -964,7 +1123,15 @@
             if ($('#vcm-use-keyfiles').is(':checked')) {
                 var ks = keyfilePaths('#vcm-keyfiles');
                 if (!ks.length) { dialogError('Choose a keyfile, or untick "Use keyfiles".'); return; }
-                if (ks.some(function (k) { return k.indexOf('/mnt/') !== 0; })) { dialogError('A keyfile must be a file under /mnt/.'); return; }
+                if (ks.length > MAX_KEYFILES) { dialogError('Too many keyfiles.'); return; }
+                if (ks.some(function (k) { return !plainMntPath(k); })) {
+                    dialogError('A keyfile must be a plain file path under /mnt/.');
+                    return;
+                }
+                if (ks.some(function (k) { return sameFile(k, data.file); })) {
+                    dialogError('The volume file cannot be its own keyfile.');
+                    return;
+                }
                 data.keyfiles = ks;
                 keyfile = true;
             }
@@ -975,15 +1142,26 @@
         // once", the volume's setting otherwise.
         var needsPim = once ? $('#vcm-use-pim').is(':checked') : !!(v && v.pim);
         var pim = needsPim ? $.trim(pimField.val()) : '';
-        if (field.val() === '' && !keyfile) { dialogError('Enter the password.'); field.trigger('focus'); return; }
-        if (needsPim && pim === '') { dialogError('Enter the PIM.'); pimField.trigger('focus'); return; }
-        if (pim !== '' && !/^[1-9][0-9]{0,8}$/.test(pim)) {
+        var pw = field.val();
+        if (pw === '' && !keyfile) { pw = null; dialogError('Enter the password.'); field.trigger('focus'); return; }
+        if (/[\0\r\n]/.test(pw)) { pw = null; dialogError('The password contains a line break.'); field.trigger('focus'); return; }
+        if (utf8Bytes(pw) > MAX_PASSWORD) {
+            pw = null;
+            dialogError('The password is longer than VeraCrypt allows (' + MAX_PASSWORD
+                + ' bytes; letters such as \u00fc count twice, emoji four times).');
+            field.trigger('focus');
+            return;
+        }
+        if (needsPim && pim === '') { pw = null; dialogError('Enter the PIM.'); pimField.trigger('focus'); return; }
+        if (pim !== '' && !PIM.test(pim)) {
+            pw = null;
             dialogError('The PIM must be a whole number from 1 upwards, without spaces.');
             pimField.trigger('focus');
             return;
         }
         // A typo such as 739184 for 739 would run into the time limit.
         if (pim !== '' && Number(pim) > PIM_WARN && !pimWarned) {
+            pw = null;
             pimWarned = true;
             $('#vcm-mount-error').prop('hidden', true);
             $('#vcm-pim-warn').prop('hidden', false);
@@ -995,7 +1173,10 @@
         var withPim = pim !== '';
         mounting = true;
         busyWatch++;
-        data.password = field.val();
+        currentUnlockId = makeUnlockId();
+        data.unlock_id = currentUnlockId;
+        data.password = pw;
+        pw = null;
         data.no_password = data.password === '' ? '1' : '0';
         if (pim !== '') { data.pim = pim; }
         field.val('');
@@ -1173,8 +1354,6 @@
             '<a href="#" class="vcm-dep-remove" title="Remove">&#10005;</a>' +
             '</li>').attr('data-container', dep.container);
     }
-
-    var MAX_KEYFILES = 8;   // as the engine
 
     // Keyfile lists: '#e-keyfiles' in the edit panel, '#vcm-keyfiles' in the
     // "Mount a file once" dialog. Each is followed by its "Add another" link.
@@ -1478,7 +1657,7 @@
         if ($('#e-ro').is(':checked')) { v.read_only = true; }
         if ($('#e-hidden').is(':checked')) { v.hidden = true; }
         if ($('#e-pim').is(':checked')) { v.pim = true; }
-        if ($('#e-idle').is(':checked')) { v.idle_lock = parseInt($('#e-idle-min').val(), 10); }
+        if ($('#e-idle').is(':checked')) { v.idle_lock = wholeInt($('#e-idle-min').val()); }
         var keyfiles = editKeyfiles();
         if (keyfiles.length) { v.keyfiles = keyfiles; }
         if ($('#e-share').val() === 'yes') {
@@ -1491,33 +1670,40 @@
         var deps = $('#e-deps li').map(function () {
             return {
                 container: $(this).attr('data-container'),
-                grace: parseInt($(this).find('.e-grace').val(), 10),
-                delay: parseInt($(this).find('.e-delay').val(), 10)
+                grace: wholeInt($(this).find('.e-grace').val()),
+                delay: wholeInt($(this).find('.e-delay').val())
             };
         }).get();
         if (deps.length) { v.dependents = deps; }
         return v;
     }
 
-    /** First checks in the browser. The engine checks everything again (Decision U1). */
+    /** First checks in the browser, mirroring check_config() in scripts/vcmount (Decision U1, audit B17.1). */
     function check(v) {
         if (!NAME.test(v.name)) { return 'The name may contain only letters, digits, - and _, at most 32 characters.'; }
-        if (v.file.charAt(0) !== '/') { return 'Choose the volume file: its path starts with /.'; }
+        if (!plainMntPath(v.file)) { return 'Choose a valid volume file path under /mnt/ (no trailing /, ".." or control characters).'; }
+        if (v.display_name !== undefined && (Array.from(v.display_name).length > 100 || /[\x00-\x1f\x7f]/.test(v.display_name))) {
+            return 'The display name may be at most 100 characters, with no control characters.';
+        }
         var taken = config.volumes.some(function (x) { return x.name === v.name && x.name !== editing; });
         if (taken) { return 'Another volume already has the name "' + v.name + '".'; }
-        if (v.mount_at !== undefined && v.mount_at.indexOf('/mnt/user/') !== 0) {
-            return 'Choose a folder inside a share: its path starts with /mnt/user/.';
+        if (v.mount_at !== undefined && !validShareMountAt(v.mount_at)) {
+            return 'Choose a folder inside a share: /mnt/user/<share>/<folder>, with no trailing /, "..", \\ or %.';
         }
-        if ((v.keyfiles || []).some(function (k) { return k.indexOf('/mnt/') !== 0; })) { return 'A keyfile must be a file under /mnt/.'; }
+        if ((v.keyfiles || []).length > MAX_KEYFILES) { return 'Too many keyfiles (at most ' + MAX_KEYFILES + ').'; }
+        if ((v.keyfiles || []).some(function (k) { return !plainMntPath(k); })) { return 'A keyfile must be a plain file path under /mnt/.'; }
+        if ((v.keyfiles || []).some(function (k) { return sameFile(k, v.file); })) { return 'The volume file cannot be its own keyfile.'; }
         if (v.idle_lock !== undefined && !(v.idle_lock >= 5 && v.idle_lock <= 1440)) {
-            return 'Lock when idle: choose 5 to 1440 minutes.';
+            return 'Lock when idle: choose a whole number from 5 to 1440 minutes.';
         }
-        if ((v.keyfiles || []).indexOf(v.file) >= 0) { return 'The volume file cannot be its own keyfile.'; }
+        if (v.share && RESERVED_SHARES.indexOf(v.name.toLowerCase()) >= 0) {
+            return 'Samba reserves the name "' + v.name + '". Rename the volume to share it.';
+        }
         if (v.share && !Object.keys(v.share.users).length) { return 'Give at least one user access to the share, or turn sharing off.'; }
         var bad = (v.dependents || []).some(function (d) {
             return !(d.grace >= 1 && d.grace <= 600 && d.delay >= 0 && d.delay <= 600);
         });
-        if (bad) { return 'Each dependent needs a stop time of 1 to 600 seconds and a wait of 0 to 600.'; }
+        if (bad) { return 'Each dependent needs a whole stop time of 1 to 600 seconds and a wait of 0 to 600.'; }
         return '';
     }
 
@@ -1596,7 +1782,7 @@
         $('#vcm-http-warning').prop('hidden', !overHttp);
 
         // The list and the dialogs.
-        $('#vcm-rows').on('click', '.vcm-mount', function () { stopQueue(); openDialog($(this).attr('data-name')); });
+        $('#vcm-rows').on('click', '.vcm-mount', function () { stopQueue(); openDialog($(this).attr('data-name'), false, this); });
         $('#vcm-rows').on('click', '.vcm-dismount', function () {
             var name = $(this).attr('data-name');
             if ($(this).is('i') || $('#vcm-rows').is('[data-compact], [data-main]')) { confirmDismount(name); } else { dismount(name); }
@@ -1614,10 +1800,10 @@
             if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $(this).trigger('click'); }
         });
         $('#vcm-rows').on('click', '.vcm-edit', function () { openEdit($(this).attr('data-name')); });
-        $('#vcm-rows').on('click', '.vcm-info', function (e) { e.preventDefault(); showInfo($(this).attr('data-name')); });
+        $('#vcm-rows').on('click', '.vcm-info', function (e) { e.preventDefault(); showInfo($(this).attr('data-name'), this); });
         $('#vcm-add').on('click', function () { openEdit(''); });
-        $('#vcm-mount-all').on('click', mountAll);
-        $('#vcm-once').on('click', function () { stopQueue(); openDialog(null); });
+        $('#vcm-mount-all').on('click', function () { mountAll(this); });
+        $('#vcm-once').on('click', function () { stopQueue(); openDialog(null, false, this); });
         $('#vcm-dismount-all').on('click', dismountAll);
         $('#vcm-cancel').on('click', function () {
             if (checkingHttp) {   // nothing has been sent yet: just close
@@ -1626,9 +1812,17 @@
             } else if (mounting) { cancelUnlock(); return; }
             stopQueue(); closeDialog(); refresh();
         });
-        $('#vcm-skip').on('click', function () { closeDialog(); nextInQueue(); });
+        $('#vcm-skip').on('click', function () { closeDialog(true); nextInQueue(); });
+        // Escape closes and Tab cycles inside the open dialog (audit B16.10).
         $(document).on('keydown', function (e) {
-            if (e.key === 'Escape' && !$('#vcm-modal').prop('hidden')) { $('#vcm-cancel').trigger('click'); }
+            if (!$('#vcm-modal').prop('hidden')) {
+                if (e.key === 'Escape') { $('#vcm-cancel').trigger('click'); return; }
+                trapTab(e, $('#vcm-modal'));
+            } else if ($('#vcm-info').length && !$('#vcm-info').prop('hidden')) {
+                if ($('.sweet-alert.visible').length) { return; }
+                if (e.key === 'Escape') { closeInfo(); return; }
+                trapTab(e, $('#vcm-info'));
+            }
         });
 
         // The edit panel.

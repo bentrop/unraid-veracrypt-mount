@@ -5,7 +5,7 @@
 # Preview:  DRY_RUN=1 bash scripts/vctest.sh <action> <volume>
 #           (prints the command for the server, runs nothing)
 #
-# Volumes:  ntfs | exfat | argon     (only these three; see the list below)
+# Volumes:  ntfs | exfat | argon | xfs   (only these four; see the list below)
 # Actions:  status   show whether the volume is open and mounted (read-only)
 #           dump     read the volume header and print its details (read-only)
 #           open     unlock the volume (creates /dev/mapper/vctest-<volume>)
@@ -34,7 +34,7 @@ SECRET_FILE="$(dirname "$0")/../.secrets/throwaway-password"
 usage() {
     echo "Usage: bash scripts/vctest.sh <action> <volume>"
     echo "  actions: status dump open mount write umount close"
-    echo "  volumes: ntfs exfat argon"
+    echo "  volumes: ntfs exfat argon xfs"
     exit 1
 }
 
@@ -46,6 +46,7 @@ case "$volume" in
     ntfs)  file="throwaway-ntfs";  fstype="ntfs3" ;;
     exfat) file="throwaway-exfat"; fstype="exfat" ;;
     argon) file="throwaway-argon"; fstype="ntfs3" ;;
+    xfs)   file="throwaway-400-xfs"; fstype="xfs" ;;
     *)     usage ;;
 esac
 
@@ -69,7 +70,9 @@ case "$action" in
         needs_password=yes
         ;;
     mount)
-        remote="mkdir -p $mountpoint && mount -t $fstype -o nosuid,nodev,uid=99,gid=100 /dev/mapper/$mapper $mountpoint"
+        # XFS keeps owners itself and refuses uid= and gid=.
+        opts="nosuid,nodev,uid=99,gid=100"; [ "$fstype" = xfs ] && opts="nosuid,nodev"
+        remote="mkdir -p $mountpoint && mount -t $fstype -o $opts /dev/mapper/$mapper $mountpoint"
         ;;
     write)
         remote="echo 'written on Bob' > $mountpoint/written-on-bob.txt && ls -la $mountpoint"

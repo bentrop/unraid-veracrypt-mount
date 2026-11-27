@@ -16,7 +16,7 @@ $vcm_display = $GLOBALS['display'] ?? [];
 <!-- The mount dialog. A real form with a real password field, so a password
      manager can fill it (UI-4). The hidden user name field holds the volume
      name, so the manager keeps one entry per volume. -->
-<div id="vcm-modal" class="vcm-modal" hidden>
+<div id="vcm-modal" class="vcm-modal" role="dialog" aria-modal="true" aria-labelledby="vcm-mount-title" hidden>
   <!-- method, action and onsubmit are a fallback only (review H1): should the
        page script ever fail, a plain form would be sent as GET and put the
        password into the address. With these, it is never sent at all. -->

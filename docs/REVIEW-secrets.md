@@ -925,9 +925,8 @@ C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be docum
   no keyfile, before cryptsetup runs; saving settings requires the revision), B13 (the
   password limit counts bytes, as VeraCrypt does), B15 (sizes in TB, a 0-byte volume
   file, short options refused), B16 (HTTPS link without the HTTP port, Apply after a
-  refused Remove, usage clamped, whole seconds), B17 (dead CSS and code). Still open:
-  S12 (one folder for the marker files), B16.10 (dialog accessibility), B17.1 (one set
-  of validation rules), C3, C5 and a few cosmetic items.
+  refused Remove, usage clamped, whole seconds), B17 (dead CSS and code). The rest
+  (S12, B16.10, B17.1, C3, C5) followed in section 14.
 
 ## 12. Fourth review: `vcm_run()` and `vcm_stop()` (B6, 2026-11-27)
 
@@ -979,3 +978,38 @@ password path sound. Claude reviewed the patch line by line before applying it.
 - **Not tested on Bob:** the array-stop timing of the minute check and `blkid -p` on a
   reformatted volume (audit "could not be verified" items 3 and 4).
 
+## 14. Remaining audit items, implemented by Neon (2026-11-27)
+
+Neon (Gemini in Antigravity) implemented the last open items in the clean audit clone
+and handed over a patch; Claude reviewed it line by line before applying it. The
+password path: secrets still reach the engine only on standard input. New on the
+command line are only the yes/no flags `--pim`, `--no-pim`, `--no-password` and a
+random unlock ID with no meaning, so the engine itself refuses a saved volume's mount
+without its PIM, with an unexpected PIM, or with no password and no keyfile.
+
+- **B6 (audit b):** after a failed XFS mount, the engine reads the last kernel
+  messages (`dmesg`) for "XFS (dm-N): Filesystem has duplicate UUID" with this volume's
+  own device and ID, and refuses with the clear duplicate-ID message. No other disk is
+  read, so sleeping disks stay asleep.
+- **S12:** runtime files in `/var/run/vcmount/` (0700, root, not a link; files 0600).
+  The `.plg` removes the old `/var/run/vcmount.*` files on install and removal.
+- **C3:** a cancel names its unlock (see DESIGN-engine, `cancel-unlock`).
+- **C5:** stop signals during a mount are only noted: before the file system is
+  mounted the volume is locked again; after that the mount is finished cleanly.
+- **B16.10:** both dialogs are marked as dialogs for screen readers, keep Tab inside,
+  close on Escape and give focus back to the button that opened them; the lock icons
+  show keyboard focus (an upright orange icon on a light patch).
+- **B17.1:** the engine is the one authority; page and web side check the same rules
+  first (plain paths, mount location only under `/mnt/addons/` or
+  `/mnt/user/<share>/<folder>` as MNT-1 and MNT-2 say, keyfile count and self-keyfile,
+  Samba's reserved names on save, whole numbers, password bytes).
+- **Accepted:** a saved settings file breaking one of the stricter rules (another
+  mount location, a shared volume named like a Samba section, a volume as its own
+  keyfile) is now refused as a whole instead of only at that mount. The page never
+  offered these; the owner's settings were checked on Bob.
+- **Tested on Bob:** `php -l` on all PHP and `.page` files; `list` with the saved
+  settings; a mount and dismount (folder `drwx------`, files `-rw-------`); a cancel
+  without ID stopping a running Argon2 unlock; an XFS copy refused with the clear
+  message while its original was mounted outside the plugin; in the browser a cancel
+  right after Mount, Tab and Escape in both dialogs, the focus mark on the tile.
+- **Not tested on Bob:** a stop signal timed exactly between unlock and mount (C5).

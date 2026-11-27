@@ -60,6 +60,8 @@ const SMB_HOOK = '/etc/samba/smb-unassigned.conf';
 const UNRAID_VARS = '/var/local/emhttp/var.ini';
 // A user name as Unraid allows it.
 const USER_PATTERN = '/\A[a-z_][a-z0-9_-]{0,31}\z/';
+// Samba gives these section names a special meaning (audit S9, B17.1).
+const RESERVED_SHARES = ['global', 'homes', 'printers', 'print$', 'ipc$'];
 
 // The plugin's yes/no settings and their defaults.
 const SETTINGS = [
@@ -72,25 +74,31 @@ const SETTINGS = [
 // The largest settings file save-config accepts, in bytes.
 const MAX_CONFIG_SIZE = 1048576;
 
-// Held while an action that changes something runs. In RAM.
-const LOCK_FILE = '/var/run/vcmount.lock';
-// Created by "vcmount cancel-unlock"; a running unlock sees it and ends its own
-// cryptsetup (UI-8). Removed at the start and end of every unlock.
-const CANCEL_FILE = '/var/run/vcmount.cancel';
+// Runtime files live in one root-only folder in RAM (mode 0700), verified not
+// to be a link and owned by root before use (audit S12, review C4).
+const RUN_DIR = '/var/run/vcmount';
+// Held while an action that changes something runs.
+const LOCK_FILE = RUN_DIR . '/lock';
+// Created by "vcmount cancel-unlock"; holds the token of the one unlock it is
+// meant for, so a late cancel never stops the next unlock (UI-8, review C3).
+const CANCEL_FILE = RUN_DIR . '/cancel';
 const CANCEL_POLL = 500000;    // microseconds between looks for CANCEL_FILE
-// Holds the start time of the password check while cryptsetup runs, so "busy"
-// can tell a waiting page that an unlock is under way. Only a time, no name.
-const UNLOCKING_FILE = '/var/run/vcmount.unlocking';
+// Holds "<start-time> <token>" while cryptsetup runs, so "busy" can tell a
+// waiting page that an unlock is under way and a cancel names only that unlock.
+// No volume name, path, password or PIM.
+const UNLOCKING_FILE = RUN_DIR . '/unlocking';
+// Opaque hex token tying a cancel to one unlock (review C3).
+const UNLOCK_TOKEN_PATTERN = '/\A[0-9a-f]{16,64}\z/';
 // Idle lock (LIFE-8): per watched volume, its kernel device, the read and write
 // counters last seen and since when they have not changed. In RAM only.
-const IDLE_FILE = '/var/run/vcmount.idle';
+const IDLE_FILE = RUN_DIR . '/idle';
 const IDLE_MIN = 5;            // minutes, the shortest idle lock time
 const IDLE_MAX = 1440;         // minutes, one day
 // Exists while the idle check fails, so the failure is reported once only.
-const IDLE_ERROR_FILE = '/var/run/vcmount.idle-error';
+const IDLE_ERROR_FILE = RUN_DIR . '/idle-error';
 // DOC-6: dependents that could not be stopped, with when that failed, so an
 // unstoppable container does not retry and flood notifications every minute.
-const STRAY_FAILED_FILE = '/var/run/vcmount.stray';
+const STRAY_FAILED_FILE = RUN_DIR . '/stray';
 const STRAY_BACKOFF = 3600;    // seconds before retrying a dependent that failed to stop
 
 // Time limits in seconds, so the engine can never hang forever.
@@ -231,9 +239,8 @@ function check_config($data, string $source): array
         $display = $entry['display_name'] ?? null;
         $mount_at = $entry['mount_at'] ?? null;
         if (($display !== null && !is_string($display)) || ($mount_at !== null && !is_string($mount_at))
-            || (is_string($display) && (mb_strlen($display, 'UTF-8') > 100 || preg_match('/[\x00-\x1f]/', $display)))
-            || (is_string($mount_at) && $mount_at !== ''
-                && (!plain_mnt_path($mount_at) || strpbrk($mount_at, '\%') !== false))) {
+            || (is_string($display) && (mb_strlen($display, 'UTF-8') > 100 || preg_match('/[\x00-\x1f\x7f]/', $display)))
+            || (is_string($mount_at) && $mount_at !== '' && !valid_mount_at($mount_at))) {
             throw new Fail("The volume \"$name\" has a display name or mount location that is not valid.", CODE_USAGE);
         }
 
@@ -251,7 +258,7 @@ function check_config($data, string $source): array
             'read_only' => !empty($entry['read_only']),
             'hidden' => !empty($entry['hidden']),
             'pim' => !empty($entry['pim']),
-            'keyfiles' => read_keyfiles($name, $entry['keyfiles'] ?? []),
+            'keyfiles' => read_keyfiles($name, $entry['keyfiles'] ?? [], $file),
             'dependents' => read_dependents($name, $entry['dependents'] ?? []),
             'share' => read_share($name, $entry['share'] ?? null),
             'idle_lock' => $idle,
@@ -264,10 +271,11 @@ function check_config($data, string $source): array
 const MAX_KEYFILES = 8;
 
 /**
- * Check a list of keyfile paths (KEY-2, KEY-3). Only the paths are stored,
- * never what the files contain. $volume names the volume in error messages.
+ * Check a list of keyfile paths (KEY-2, KEY-3, audit B17.1). Only the paths are
+ * stored, never what the files contain. $volume names the volume in error
+ * messages; when $volume_file is given, the volume file cannot be its own keyfile.
  */
-function read_keyfiles(string $volume, $list): array
+function read_keyfiles(string $volume, $list, ?string $volume_file = null): array
 {
     $fault = new Fail("The volume \"$volume\" has a keyfile path that is not valid.", CODE_USAGE);
     if (!is_array($list) || count($list) > MAX_KEYFILES) {
@@ -275,9 +283,11 @@ function read_keyfiles(string $volume, $list): array
     }
     $paths = [];
     foreach ($list as $path) {
-        if (!is_string($path) || !str_starts_with($path, '/mnt/') || strlen($path) > 4096
-            || preg_match('/[\x00-\x1f]/', $path)) {
+        if (!is_string($path) || !plain_mnt_path($path)) {
             throw $fault;
+        }
+        if ($volume_file !== null && same_file($path, $volume_file)) {
+            throw new Fail('The volume file cannot be its own keyfile.', CODE_USAGE);
         }
         $paths[] = $path;
     }
@@ -347,6 +357,9 @@ function read_share(string $volume, $entry): ?array
 {
     if ($entry === null || $entry === false) {
         return null;
+    }
+    if (in_array(strtolower($volume), RESERVED_SHARES, true)) {
+        throw new Fail("No share for \"$volume\": Samba reserves that name. Rename the volume to share it.", CODE_USAGE);
     }
     $fault = new Fail("The volume \"$volume\" has share settings that are not valid.", CODE_USAGE);
     if (!is_array($entry) || !is_array($entry['users'] ?? null) || $entry['users'] === []) {
@@ -716,7 +729,7 @@ function program(string $name): string
  * $show_errors: let the program write its error messages straight to the user.
  */
 function run(array $command, int $timeout, $stdin = null, bool $show_errors = false,
-             bool $cancellable = false): array
+             bool $cancellable = false, ?string $cancel_token = null): array
 {
     // Ctrl+C, a closed terminal or a stop signal also reach cryptsetup, which
     // ignores them until its key derivation ends. Catch them here instead and
@@ -737,7 +750,7 @@ function run(array $command, int $timeout, $stdin = null, bool $show_errors = fa
         }
     }
     try {
-        return run_watched($command, $timeout, $stdin, $show_errors, $cancellable, $stop);
+        return run_watched($command, $timeout, $stdin, $show_errors, $cancellable, $stop, $cancel_token);
     } finally {
         foreach ($previous as $signal => $handler) {
             pcntl_signal($signal, $handler);
@@ -747,7 +760,7 @@ function run(array $command, int $timeout, $stdin = null, bool $show_errors = fa
 
 /** The body of run(); $stop is set by run()'s signal handlers. */
 function run_watched(array $command, int $timeout, $stdin, bool $show_errors,
-                     bool $cancellable, bool &$stop): array
+                     bool $cancellable, bool &$stop, ?string $cancel_token): array
 {
     $spec = [
         0 => $stdin ?? ['file', '/dev/null', 'r'],
@@ -775,7 +788,7 @@ function run_watched(array $command, int $timeout, $stdin, bool $show_errors,
             proc_terminate($process);
             break;
         }
-        if ($cancellable && ($stop || file_exists(CANCEL_FILE))) {
+        if ($cancellable && ($stop || ($cancel_token !== null && cancel_matches($cancel_token)))) {
             // Our own child, not yet collected, so its process number cannot
             // belong to another program. cryptsetup writes nothing before the
             // password is right, so ending it at once is safe.
@@ -927,7 +940,7 @@ function start_dependents(string $volume, array $dependents): array
         if ($reason !== null) {
             $failed[] = ['container' => $container, 'reason' => $reason];
             log_event("dependent \"$container\" of \"$volume\" could not be started", true);
-        } elseif ($dependent['delay'] > 0 && $i < $last) {
+        } elseif ($dependent['delay'] > 0 && $i < $last && !$GLOBALS['vcm_stop']) {
             sleep($dependent['delay']);
         }
     }
@@ -941,13 +954,37 @@ function start_dependents(string $volume, array $dependents): array
  * or failed) and a message.
  */
 /*
- * Array stop and shutdown (audit S2). The hooks say how many seconds they
- * have (--within); the engine then shares that time out instead of being cut
- * off half-way. A stop signal from the hook's time limit only asks: the volume
- * being worked on is finished, the rest is left to Unraid.
+ * Array stop and shutdown (audit S2), and finishing a mount after a signal
+ * (review C5). The hooks say how many seconds they have (--within); the engine
+ * then shares that time out instead of being cut off half-way. A stop signal
+ * only asks: the volume being worked on is finished or rolled back cleanly.
  */
 $GLOBALS['vcm_deadline'] = null;   // microtime() by which to be done, or null
 $GLOBALS['vcm_stop'] = false;      // a stop signal arrived
+
+/**
+ * Catch stop signals so they are only noted in $GLOBALS['vcm_stop'] instead of
+ * ending the engine mid-way (audit S2, review C5). Returns the previous
+ * handlers so the caller can put them back with restore_signals().
+ */
+function defer_signals(): array
+{
+    $previous = [];
+    pcntl_async_signals(true);
+    foreach ([SIGINT, SIGTERM, SIGHUP] as $signal) {
+        $previous[$signal] = pcntl_signal_get_handler($signal);
+        pcntl_signal($signal, function () { $GLOBALS['vcm_stop'] = true; });
+    }
+    return $previous;
+}
+
+/** Put back the signal handlers saved by defer_signals(). */
+function restore_signals(array $previous): void
+{
+    foreach ($previous as $signal => $handler) {
+        pcntl_signal($signal, $handler);
+    }
+}
 
 /** Take the time limit from --within and catch stop signals from now on. */
 function watch_time(array $options): void
@@ -958,10 +995,7 @@ function watch_time(array $options): void
         }
         $GLOBALS['vcm_deadline'] = microtime(true) + (int) $options['within'];
     }
-    pcntl_async_signals(true);
-    foreach ([SIGINT, SIGTERM, SIGHUP] as $signal) {
-        pcntl_signal($signal, function () { $GLOBALS['vcm_stop'] = true; });
-    }
+    defer_signals();
 }
 
 /** Seconds left before the deadline, or null without one. */
@@ -1172,7 +1206,7 @@ function share_active(string $name): bool
 function add_share(string $name, array $share, string $point, bool $read_only): void
 {
     // Samba gives these section names a special meaning (audit S9).
-    if (in_array(strtolower($name), ['global', 'homes', 'printers', 'print$', 'ipc$'], true)) {
+    if (in_array(strtolower($name), RESERVED_SHARES, true)) {
         throw new Fail("No share for \"$name\": Samba reserves that name. Rename the volume to share it.", CODE_SHARE);
     }
     if (!smb_enabled()) {
@@ -1307,13 +1341,19 @@ function network_open(string $file): ?string
  */
 function take_lock()
 {
+    ensure_run_dir();
+    if (is_link(LOCK_FILE)) {
+        throw new Fail('Refused: ' . LOCK_FILE . ' is a link.', CODE_REFUSED);
+    }
     // 'e': programs this one starts do not inherit the lock, so a helper left
     // running after this program was ended cannot keep it (audit S2).
     $handle = @fopen(LOCK_FILE, 'ce');
     if ($handle === false) {
         throw new Fail('Could not create the lock file ' . LOCK_FILE . '.', CODE_USAGE);
     }
+    @chmod(LOCK_FILE, 0600);
     if (!flock($handle, LOCK_EX | LOCK_NB)) {
+        fclose($handle);
         throw new Fail('Another vcmount action is still running.', CODE_IN_PROGRESS);
     }
     return $handle;
@@ -1370,11 +1410,10 @@ function same_file(string $one, string $two): bool
     return $through_user_share && $a[2] === $b[2];
 }
 
-/** Refuse a mount point that is not safe to use. Creates nothing. */
 /**
  * Is this a plain path below /mnt/: absolute, no empty, "." or ".." parts, no
- * trailing slash, no control characters, not too long? Used for volume files
- * and mount locations (audit S1, S3); keyfiles have their own check.
+ * trailing slash, no control characters, not too long? Used for volume files,
+ * keyfiles and mount locations (audit S1, S3, B17.1).
  */
 function plain_mnt_path(string $path): bool
 {
@@ -1383,11 +1422,25 @@ function plain_mnt_path(string $path): bool
         && !preg_match('#/\.\.?(/|\z)#', $path) && !preg_match('/[\x00-\x1f\x7f]/', $path);
 }
 
+/**
+ * Is this a valid mount location? Either under /mnt/addons/ (MNT-1, default
+ * /mnt/addons/<name>) or a folder inside an Unraid user share
+ * (/mnt/user/<share>/<folder>, MNT-2). No trailing slash, "..", control
+ * characters, "\" or "%" (audit S1, S9, B17.1).
+ */
+function valid_mount_at(string $point): bool
+{
+    return plain_mnt_path($point)
+        && strpbrk($point, '\%') === false
+        && (preg_match('#\A/mnt/addons/[^/]+#', $point) === 1
+            || preg_match('#\A/mnt/user/[^/]+/[^/]+#', $point) === 1);
+}
+
+/** Refuse a mount point that is not safe to use. Creates nothing. */
 function check_mount_point(string $point): void
 {
-    // A backslash or % would also break the share's Samba section (audit S9).
-    if (!plain_mnt_path($point) || !preg_match('#\A/mnt/[^/]+/[^/]+#', $point) || strpbrk($point, '\%') !== false) {
-        throw new Fail("The mount location $point is not valid. It must be a folder below /mnt/<something>/.", CODE_USAGE);
+    if (!valid_mount_at($point)) {
+        throw new Fail("The mount location $point is not valid. It must be under /mnt/addons/ or a folder inside a share under /mnt/user/<share>/.", CODE_USAGE);
     }
     // No part of the path may be a link, or root would create folders and
     // mount wherever the link points (audit S1). Parts that do not exist yet
@@ -1435,9 +1488,19 @@ function lock_again(string $mapper): bool
  * Whatever goes wrong, the steps already taken are undone.
  */
 function do_mount(string $name, string $file, string $point, bool $read_only,
-                  array $keyfiles = [], bool $pim = false, bool $hidden = false): void
+                  array $keyfiles = [], bool $pim = false, bool $hidden = false,
+                  ?string $unlock_id = null): void
 {
-    @unlink(CANCEL_FILE);   // an old cancel must not stop this unlock
+    $token = $unlock_id ?? bin2hex(random_bytes(16));
+    // A very early cancel for this exact unlock may have arrived before we
+    // took the lock; any other cancel marker belongs to an earlier unlock (review C3).
+    $existing_cancel = read_marker(CANCEL_FILE);
+    if ($existing_cancel !== null) {
+        @unlink(CANCEL_FILE);
+        if (trim($existing_cancel) === $token) {
+            throw new Fail('Unlocking was cancelled.', CODE_UNLOCK_FAILED);
+        }
+    }
     // One message for every refusal, so it does not tell which files exist
     // elsewhere on the server (audit S3, as for keyfiles).
     $real = plain_mnt_path($file) ? realpath($file) : false;
@@ -1462,6 +1525,13 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
     if ($client !== null) {
         throw new Fail("Refused: the volume file is open over the network ($client).", CODE_REFUSED);
     }
+    // Check once more in case a cancel or stop signal arrived during the checks above.
+    if ($GLOBALS['vcm_stop'] || cancel_matches($token)) {
+        if (cancel_matches($token)) {
+            @unlink(CANCEL_FILE);
+        }
+        throw new Fail('Unlocking was cancelled.', CODE_UNLOCK_FAILED);
+    }
 
     // Unlock. cryptsetup reads the password itself, straight from our
     // standard input, and with a PIM the PIM after it (the next line, or a
@@ -1483,11 +1553,13 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
     }
     $command[] = $real;
     $command[] = $mapper;
-    write_marker(UNLOCKING_FILE, (string) time());
+    write_marker(UNLOCKING_FILE, time() . ' ' . $token);
     try {
-        $r = run($command, UNLOCK_TIMEOUT, STDIN, true, true);
+        $r = run($command, UNLOCK_TIMEOUT, STDIN, true, true, $token);
     } finally {
-        @unlink(CANCEL_FILE);
+        if (cancel_matches($token)) {
+            @unlink(CANCEL_FILE);
+        }
         @unlink(UNLOCKING_FILE);
     }
     if ($r['code'] !== 0) {
@@ -1521,6 +1593,19 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
         throw new Fail("cryptsetup could not open the volume (its result code was {$r['code']}).", CODE_USAGE);
     }
 
+    // If a stop signal arrived right after cryptsetup finished, roll back now
+    // rather than leaving an unlocked volume behind (review C5).
+    if ($GLOBALS['vcm_stop']) {
+        $locked = lock_again($mapper);
+        if (!$locked) {
+            sleep(1);
+            $locked = lock_again($mapper);
+        }
+        throw new Fail('Unlocking was cancelled.'
+            . ($locked ? '' : ' The volume could NOT be locked again: dismount it, or restart the server.'),
+            CODE_UNLOCK_FAILED);
+    }
+
     // Which filesystem is inside? -p reads the device itself, never blkid's
     // cache, which could still hold an earlier volume of this name (audit B14).
     $r = run([program('blkid'), '-p', '-o', 'value', '-s', 'TYPE', $device], TOOL_TIMEOUT);
@@ -1545,9 +1630,10 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
     // the volume file (VOL-7, audit S12). And a copy of a mounted XFS volume:
     // XFS refuses a second file system with the same ID (audit B14). Btrfs
     // gives such a copy a temporary ID of its own (kernel 6.7 and later).
+    $xfs_uuid = $found === 'xfs' ? filesystem_uuid($device) : '';
     try {
         if ($found === 'xfs') {
-            $twin = xfs_twin($name, $device);
+            $twin = xfs_twin($name, $xfs_uuid);
             if ($twin !== null) {
                 throw new Fail("Refused: its file system has the same ID (UUID) as the mounted volume \"$twin\", "
                     . 'so it is probably a copy of it. XFS cannot mount both at once. Dismount "'
@@ -1559,12 +1645,20 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
         if ($client !== null) {
             throw new Fail("Refused: the volume file was opened over the network ($client) while it was being unlocked.", CODE_REFUSED);
         }
+        if ($GLOBALS['vcm_stop']) {
+            throw new Fail('Unlocking was cancelled.', CODE_UNLOCK_FAILED);
+        }
     } catch (Fail $e) {
         $locked = lock_again($mapper);
+        if (!$locked) {
+            sleep(1);
+            $locked = lock_again($mapper);
+        }
         throw new Fail($e->getMessage() . ($locked ? ' The volume was locked again.' : ' The volume could NOT be locked again.'), $e->getCode());
     }
 
-    // Mount. Never with the "force" option.
+    // Mount. Never with the "force" option. Once mounting begins, a deferred
+    // stop signal lets the mount, share and dependents finish cleanly (review C5).
     $created = false;
     if (!is_dir($point)) {
         if (!@mkdir($point, 0755, true)) {
@@ -1593,16 +1687,21 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
     }
     $r = run([program('mount'), '-t', $drivers[$found], '-o', $options, $device, $point], TOOL_TIMEOUT);
     if ($r['code'] !== 0) {
+        // Read this volume's dm-N before lock_again() removes the mapper device.
+        $dm = $found === 'xfs' ? dm_name($device) : null;
         if ($created) {
             @rmdir($point);
         }
         $locked = lock_again($mapper);
-        // Duplicate UUID against a non-plugin XFS filesystem (e.g. an array
-        // disk): never advise xfs_repair (audit B6).
-        if ($found === 'xfs' && preg_match('/duplicate|file exists/i', $r['err'])) {
+        // Duplicate UUID against a non-plugin XFS disk (e.g. an array disk):
+        // mount only reports "wrong fs type", while the kernel logs
+        // "XFS (dm-N): Filesystem has duplicate UUID ... - can't mount".
+        // Check dmesg for this device instead of probing other disks (which
+        // would spin up sleeping drives), and never advise xfs_repair
+        // (audit 2026-11-27b B6).
+        if ($found === 'xfs' && (preg_match('/duplicate|file exists/i', $r['err']) || xfs_duplicate_in_dmesg($dm, $xfs_uuid))) {
             throw new Fail(
-                "Refused: its XFS file system has the same ID (UUID) as another mounted XFS file system on this server.\n"
-                . trim($r['err']) . "\n"
+                'Refused: its XFS file system has the same ID (UUID) as another mounted XFS file system on this server. '
                 . 'XFS cannot mount two file systems with the same ID at once. '
                 . ($locked ? 'The volume was locked again.' : 'The volume could NOT be locked again.'),
                 CODE_REFUSED
@@ -1635,13 +1734,41 @@ function filesystem_uuid(string $device): string
 }
 
 /**
+ * Did the kernel refuse this XFS mount because its UUID is already mounted
+ * elsewhere on the server? Look at the last kernel messages for this volume's
+ * own dm-N. Reading dmesg never touches other disks, so sleeping drives stay
+ * asleep (audit 2026-11-27b B6).
+ */
+function xfs_duplicate_in_dmesg(?string $dm, string $uuid): bool
+{
+    if ($dm === null) {
+        return false;
+    }
+    try {
+        $r = run([program('dmesg')], TOOL_TIMEOUT);
+    } catch (Fail $e) {
+        return false;
+    }
+    if ($r['code'] !== 0) {
+        return false;
+    }
+    $lines = array_slice(explode("\n", trim($r['out'])), -30);
+    $pattern = '/\bXFS \(' . preg_quote($dm, '/') . '\): Filesystem has duplicate UUID\b/i';
+    foreach (array_reverse($lines) as $line) {
+        if (preg_match($pattern, $line) === 1 && ($uuid === '' || stripos($line, $uuid) !== false)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * Another unlocked volume of this plugin whose XFS file system has the same ID
  * as this device, typically the original of a copied volume file. Returns its
  * name, or null.
  */
-function xfs_twin(string $name, string $device): ?string
+function xfs_twin(string $name, string $uuid): ?string
 {
-    $uuid = filesystem_uuid($device);
     if ($uuid === '') {
         return null;
     }
@@ -1657,11 +1784,17 @@ function xfs_twin(string $name, string $device): ?string
 
 function command_mount(array $args, array $options, bool $json): int
 {
+    if ($options['unlock_id'] !== null && !preg_match(UNLOCK_TOKEN_PATTERN, $options['unlock_id'])) {
+        throw new Fail('That is not a valid unlock identifier.', CODE_USAGE);
+    }
+    if ($options['pim'] && $options['no_pim']) {
+        throw new Fail('Cannot use --pim and --no-pim together.', CODE_USAGE);
+    }
     $config = load_config();
 
     if ($options['file'] !== null || $options['name'] !== null) {
         // Mount without saving: nothing about it is stored or logged.
-        if ($args !== [] || $options['file'] === null || $options['name'] === null) {
+        if ($args !== [] || $options['file'] === null || $options['name'] === null || $options['no_pim']) {
             throw new Fail('Usage: vcmount mount --file <path> --name <name> [--read-only] [--keyfile <path>]... [--pim] [--hidden]', CODE_USAGE);
         }
         $name = $options['name'];
@@ -1671,18 +1804,24 @@ function command_mount(array $args, array $options, bool $json): int
         if (isset($config[$name])) {
             throw new Fail("A saved volume is already named \"$name\". Choose another name.", CODE_USAGE);
         }
-        if ($options['file'] === '' || $options['file'][0] !== '/') {
-            throw new Fail('The path of the volume file must start with /.', CODE_USAGE);
+        if (!plain_mnt_path($options['file'])) {
+            throw new Fail('That is not a valid path to a volume file.', CODE_USAGE);
+        }
+        $keyfiles = read_keyfiles($name, $options['keyfile'], $options['file']);
+        if ($options['no_password'] && $keyfiles === []) {
+            throw new Fail('Enter the password.', CODE_USAGE);
         }
         $saved = false;
         $volume = [
             'file' => $options['file'], 'mount_at' => "/mnt/addons/$name", 'read_only' => false,
             'hidden' => $options['hidden'], 'pim' => $options['pim'],
-            'keyfiles' => read_keyfiles($name, $options['keyfile']), 'dependents' => [], 'share' => null,
+            'keyfiles' => $keyfiles, 'dependents' => [], 'share' => null,
         ];
     } else {
         // A saved volume uses its saved keyfiles, PIM and hidden settings.
-        if (count($args) !== 1 || $options['keyfile'] !== [] || $options['pim'] || $options['hidden']) {
+        // The web layer passes --pim / --no-pim and --no-password so the engine
+        // enforces the same credential rules as the single authority (audit B17.1).
+        if (count($args) !== 1 || $options['keyfile'] !== [] || $options['hidden']) {
             throw new Fail('Usage: vcmount mount <name> [--read-only]', CODE_USAGE);
         }
         $name = $args[0];
@@ -1694,6 +1833,15 @@ function command_mount(array $args, array $options, bool $json): int
         }
         $saved = true;
         $volume = $config[$name];
+        if ($options['no_pim'] && $volume['pim']) {
+            throw new Fail('This volume asks for a PIM. Enter it.', CODE_USAGE);
+        }
+        if ($options['pim'] && !$volume['pim']) {
+            throw new Fail('This volume does not use a PIM.', CODE_USAGE);
+        }
+        if ($options['no_password'] && $volume['keyfiles'] === []) {
+            throw new Fail('Enter the password.', CODE_USAGE);
+        }
     }
     $read_only = $volume['read_only'] || $options['read_only'];
 
@@ -1703,70 +1851,80 @@ function command_mount(array $args, array $options, bool $json): int
     }
 
     $lock = take_lock();
+    // Catch stop signals across the whole mount so a signal never cuts off the
+    // engine between unlocking, mounting, sharing and starting dependents
+    // (review C5). During cryptsetup, run() replaces these temporarily to stop
+    // cryptsetup at once, then restores them on exit.
+    $GLOBALS['vcm_stop'] = false;
+    $previous_signals = defer_signals();
     try {
-        do_mount($name, $volume['file'], $volume['mount_at'], $read_only,
-                 $volume['keyfiles'], $volume['pim'], $volume['hidden']);
-    } catch (Fail $e) {
+        try {
+            do_mount($name, $volume['file'], $volume['mount_at'], $read_only,
+                     $volume['keyfiles'], $volume['pim'], $volume['hidden'], $options['unlock_id']);
+        } catch (Fail $e) {
+            if ($saved) {
+                $reasons = [
+                    CODE_UNLOCK_FAILED => 'could not unlock',
+                    CODE_REFUSED => 'refused by a safety check',
+                    CODE_FILESYSTEM => 'filesystem could not be mounted',
+                ];
+                $reason = $reasons[$e->getCode()] ?? 'error';
+                // A cancel (also by the array-stop hooks) and the time limit are no
+                // wrong password; say what happened.
+                if (str_starts_with($e->getMessage(), 'Unlocking was cancelled')) {
+                    $reason = 'cancelled';
+                } elseif (str_starts_with($e->getMessage(), 'Unlocking took too long')) {
+                    $reason = 'unlocking took too long';
+                }
+                log_event("mount of \"$name\" failed: $reason");
+            }
+            throw $e;
+        }
+        $failed = [];
+        $share_error = null;
         if ($saved) {
-            $reasons = [
-                CODE_UNLOCK_FAILED => 'could not unlock',
-                CODE_REFUSED => 'refused by a safety check',
-                CODE_FILESYSTEM => 'filesystem could not be mounted',
-            ];
-            $reason = $reasons[$e->getCode()] ?? 'error';
-            // A cancel (also by the array-stop hooks) and the time limit are no
-            // wrong password; say what happened.
-            if (str_starts_with($e->getMessage(), 'Unlocking was cancelled')) {
-                $reason = 'cancelled';
-            } elseif (str_starts_with($e->getMessage(), 'Unlocking took too long')) {
-                $reason = 'unlocking took too long';
+            log_event("mounted \"$name\"" . ($read_only ? ' read-only' : ''));
+            // The share comes before the dependents; a share that fails does not
+            // hold them back.
+            if ($volume['share'] !== null) {
+                try {
+                    add_share($name, $volume['share'], $volume['mount_at'], $read_only);
+                    log_event("shared \"$name\" over SMB");
+                } catch (Fail $e) {
+                    $share_error = $e->getMessage();
+                    log_event("share of \"$name\" could not be added", true);
+                }
             }
-            log_event("mount of \"$name\" failed: $reason");
+            $failed = start_dependents($name, $volume['dependents']);
         }
-        throw $e;
-    }
-    $failed = [];
-    $share_error = null;
-    if ($saved) {
-        log_event("mounted \"$name\"" . ($read_only ? ' read-only' : ''));
-        // The share comes before the dependents; a share that fails does not
-        // hold them back.
-        if ($volume['share'] !== null) {
-            try {
-                add_share($name, $volume['share'], $volume['mount_at'], $read_only);
-                log_event("shared \"$name\" over SMB");
-            } catch (Fail $e) {
-                $share_error = $e->getMessage();
-                log_event("share of \"$name\" could not be added", true);
-            }
-        }
-        $failed = start_dependents($name, $volume['dependents']);
-    }
-    $code = $share_error !== null ? CODE_SHARE : ($failed === [] ? CODE_OK : CODE_DEPENDENT);
+        $code = $share_error !== null ? CODE_SHARE : ($failed === [] ? CODE_OK : CODE_DEPENDENT);
 
-    if ($json) {
-        $v = describe($name, $saved ? $volume : null, live_volumes()[$name] ?? null);
-        echo json_encode(
-            ['ok' => true, 'code' => $code, 'volume' => $v, 'share_error' => $share_error, 'failed_dependents' => $failed,
-             'top_folder_blocked' => $share_error === null && top_folder_blocked($name, $saved ? $volume : null)],
-            JSON_UNESCAPED_SLASHES
-        ), "\n";
+        if ($json) {
+            $v = describe($name, $saved ? $volume : null, live_volumes()[$name] ?? null);
+            echo json_encode(
+                ['ok' => true, 'code' => $code, 'volume' => $v, 'share_error' => $share_error, 'failed_dependents' => $failed,
+                 'top_folder_blocked' => $share_error === null && top_folder_blocked($name, $saved ? $volume : null)],
+                JSON_UNESCAPED_SLASHES
+            ), "\n";
+            return $code;
+        }
+        echo "Mounted \"$name\" at {$volume['mount_at']}", $read_only ? ' (read-only).' : '.', "\n";
+        if ($share_error !== null) {
+            fwrite(STDERR, $share_error . "\n");
+        } elseif ($saved && $volume['share'] !== null) {
+            echo 'Shared as \\\\', php_uname('n'), '\\', $name, ".\n";
+        }
+        foreach ($failed as $f) {
+            fwrite(STDERR, "Dependent \"{$f['container']}\" could not be started: {$f['reason']}\n");
+        }
+        if ($share_error === null && top_folder_blocked($name, $saved ? $volume : null)) {
+            echo "Note: the share cannot write yet, because the volume's top folder belongs to another user.\n",
+                 "To let it, run: vcmount fix-top $name   (only the top folder is changed)\n";
+        }
         return $code;
+    } finally {
+        restore_signals($previous_signals);
     }
-    echo "Mounted \"$name\" at {$volume['mount_at']}", $read_only ? ' (read-only).' : '.', "\n";
-    if ($share_error !== null) {
-        fwrite(STDERR, $share_error . "\n");
-    } elseif ($saved && $volume['share'] !== null) {
-        echo 'Shared as \\\\', php_uname('n'), '\\', $name, ".\n";
-    }
-    foreach ($failed as $f) {
-        fwrite(STDERR, "Dependent \"{$f['container']}\" could not be started: {$f['reason']}\n");
-    }
-    if ($share_error === null && top_folder_blocked($name, $saved ? $volume : null)) {
-        echo "Note: the share cannot write yet, because the volume's top folder belongs to another user.\n",
-             "To let it, run: vcmount fix-top $name   (only the top folder is changed)\n";
-    }
-    return $code;
 }
 
 /** How a program is named to the user: its name and process number. */
@@ -2566,15 +2724,55 @@ function command_privacy(array $args, bool $json): int
     return CODE_OK;
 }
 
+/** Is RUN_DIR an existing real folder (not a link) owned by root? */
+function run_dir_safe(): bool
+{
+    clearstatcache(true, RUN_DIR);
+    $st = @lstat(RUN_DIR);
+    // 0170000 is the file-type mask; 0040000 is a real directory (not a link).
+    return $st !== false && ($st['mode'] & 0170000) === 0040000 && $st['uid'] === 0;
+}
+
 /**
- * Write one of the marker files in /var/run atomically with mode 0600. A fresh
+ * Make sure the runtime folder (/var/run/vcmount) exists with mode 0700, is a
+ * real folder (not a link) and belongs to root (audit S12).
+ */
+function ensure_run_dir(): void
+{
+    clearstatcache(true, RUN_DIR);
+    $st = @lstat(RUN_DIR);
+    if ($st === false) {
+        if (!@mkdir(RUN_DIR, 0700)) {
+            // Another vcmount may have created it at the same instant.
+            clearstatcache(true, RUN_DIR);
+            $st = @lstat(RUN_DIR);
+            if ($st === false) {
+                throw new Fail('Could not create ' . RUN_DIR . '.', CODE_USAGE);
+            }
+        } else {
+            @chmod(RUN_DIR, 0700);
+            clearstatcache(true, RUN_DIR);
+            $st = @lstat(RUN_DIR);
+        }
+    }
+    if ($st === false || ($st['mode'] & 0170000) !== 0040000 || $st['uid'] !== 0) {
+        throw new Fail('Refused: ' . RUN_DIR . ' is not a root-owned folder.', CODE_REFUSED);
+    }
+    if (($st['mode'] & 07777) !== 0700 && !@chmod(RUN_DIR, 0700)) {
+        throw new Fail('Could not set permissions on ' . RUN_DIR . '.', CODE_USAGE);
+    }
+}
+
+/**
+ * Write one of the marker files in RUN_DIR atomically with mode 0600. A fresh
  * temp file ('x' fails if anything exists there) is restricted to root, written,
  * and renamed into place — rename replaces any symlink at $path without
  * following it, and concurrent readers never see a half-written file (review C4,
- * audit 2026-11-27b S4).
+ * audit S12, audit 2026-11-27b S4).
  */
 function write_marker(string $path, string $content): bool
 {
+    ensure_run_dir();
     $temp = $path . '.new.' . getmypid();
     @unlink($temp);
     $handle = @fopen($temp, 'x');
@@ -2591,14 +2789,34 @@ function write_marker(string $path, string $content): bool
     return true;
 }
 
-/** Read a marker file, but never through a link. */
+/** Read a marker file inside RUN_DIR, never through a link. */
 function read_marker(string $path): ?string
 {
-    if (is_link($path) || !is_file($path)) {
+    if (!run_dir_safe() || is_link($path) || !is_file($path)) {
         return null;
     }
     $text = @file_get_contents($path);
     return $text === false ? null : $text;
+}
+
+/**
+ * Read UNLOCKING_FILE: returns ['since' => int, 'token' => ?string] or null.
+ * Only holds a start timestamp and an opaque hex token (review C3).
+ */
+function read_unlocking_marker(): ?array
+{
+    $text = read_marker(UNLOCKING_FILE);
+    if ($text === null || !preg_match('/\A([0-9]+)(?:\s+([0-9a-f]{16,64}))?\z/', trim($text), $m)) {
+        return null;
+    }
+    return ['since' => (int) $m[1], 'token' => $m[2] ?? null];
+}
+
+/** Does CANCEL_FILE carry the token of this unlock (review C3)? */
+function cancel_matches(string $token): bool
+{
+    $text = read_marker(CANCEL_FILE);
+    return $text !== null && trim($text) === $token;
 }
 
 /** The idle state as the last idle check wrote it: name => dm, io, since, warned. */
@@ -3050,22 +3268,42 @@ function stray_dependents(): array
 }
 
 /**
- * Ask a running unlock to stop (UI-8). Only leaves a marker; the mount that is
- * waiting for cryptsetup ends its own child. Takes no lock, since the mount
- * holds it. Without a running unlock the marker is removed by the next one.
+ * Ask a running unlock to stop (UI-8, review C3). Leaves a marker carrying the
+ * token of the one unlock it is meant for; only that unlock honours it and ends
+ * its own cryptsetup. Takes no lock, since the mount holds it.
+ *
+ * With --unlock-id <token> (from the web page): writes that token unless a
+ * different unlock is already running (so a late cancel never hurts the next
+ * unlock, while a very early cancel waits for its own mount).
+ * Without --unlock-id (from SSH or array-stop hooks): reads the running
+ * unlock's token from UNLOCKING_FILE and writes it; if no unlock is running,
+ * does nothing.
  */
-function command_cancel_unlock(array $args, bool $json): int
+function command_cancel_unlock(array $args, ?string $unlock_id, bool $json): int
 {
     if ($args !== []) {
-        throw new Fail('Usage: vcmount cancel-unlock', CODE_USAGE);
+        throw new Fail('Usage: vcmount cancel-unlock [--unlock-id <id>]', CODE_USAGE);
     }
-    if (!write_marker(CANCEL_FILE, '')) {
+    if ($unlock_id !== null && !preg_match(UNLOCK_TOKEN_PATTERN, $unlock_id)) {
+        throw new Fail('That is not a valid unlock identifier.', CODE_USAGE);
+    }
+    $current = read_unlocking_marker();
+    $current_token = $current['token'] ?? null;
+    $target = null;
+    if ($unlock_id !== null) {
+        if ($current_token === null || $current_token === $unlock_id) {
+            $target = $unlock_id;
+        }
+    } elseif ($current_token !== null) {
+        $target = $current_token;
+    }
+    if ($target !== null && !write_marker(CANCEL_FILE, $target)) {
         throw new Fail('Could not create ' . CANCEL_FILE . '.', CODE_USAGE);
     }
     if ($json) {
         echo json_encode(['ok' => true]), "\n";
     } else {
-        echo "Asked a running unlock to stop.\n";
+        echo $target !== null ? "Asked the running unlock to stop.\n" : "No unlock is running.\n";
     }
     return CODE_OK;
 }
@@ -3079,17 +3317,29 @@ function command_busy(array $args, bool $json): int
     if ($args !== []) {
         throw new Fail('Usage: vcmount busy', CODE_USAGE);
     }
-    $handle = @fopen(LOCK_FILE, 'c');
-    $busy = $handle !== false && !flock($handle, LOCK_EX | LOCK_NB);
-    if ($handle !== false) {
-        fclose($handle);   // also lets go of the lock if we got it
+    $busy = false;
+    if (file_exists(RUN_DIR) || is_link(RUN_DIR)) {
+        if (!run_dir_safe()) {
+            throw new Fail('Refused: ' . RUN_DIR . ' is not a root-owned folder.', CODE_REFUSED);
+        }
+        if (is_link(LOCK_FILE)) {
+            throw new Fail('Refused: ' . LOCK_FILE . ' is a link.', CODE_REFUSED);
+        }
+        if (is_file(LOCK_FILE)) {
+            $handle = @fopen(LOCK_FILE, 'ce');
+            $busy = $handle !== false && !flock($handle, LOCK_EX | LOCK_NB);
+            if ($handle !== false) {
+                fclose($handle);   // also lets go of the lock if we got it
+            }
+        }
     }
-    // Seconds since a running password check started, or null.
-    $since = $busy ? read_marker(UNLOCKING_FILE) : null;
-    $unlocking_for = ($since !== null && preg_match('/\A[0-9]+\z/', trim($since)) === 1)
-        ? max(0, time() - (int) trim($since)) : null;
+    // Seconds since a running password check started, and its opaque token for
+    // "Stop that unlock", or null (review C3).
+    $marker = $busy ? read_unlocking_marker() : null;
+    $unlocking_for = $marker !== null ? max(0, time() - $marker['since']) : null;
+    $unlock_id = $marker['token'] ?? null;
     if ($json) {
-        echo json_encode(['ok' => true, 'busy' => $busy, 'unlocking_for' => $unlocking_for]), "\n";
+        echo json_encode(['ok' => true, 'busy' => $busy, 'unlocking_for' => $unlocking_for, 'unlock_id' => $unlock_id]), "\n";
     } else {
         echo $busy ? "Another vcmount action is running.\n" : "No vcmount action is running.\n";
     }
@@ -3515,13 +3765,14 @@ function parse_args(array $args): array
     $flags = [
         '--json' => 'json', '--read-only' => 'read_only', '--all' => 'all',
         '--force' => 'force', '--array-stop' => 'array_stop', '--over-http' => 'over_http',
-        '--pim' => 'pim', '--hidden' => 'hidden',
+        '--pim' => 'pim', '--no-pim' => 'no_pim', '--no-password' => 'no_password', '--hidden' => 'hidden',
     ];
-    $values = ['--file' => 'file', '--name' => 'name', '--revision' => 'revision', '--within' => 'within'];
+    $values = ['--file' => 'file', '--name' => 'name', '--revision' => 'revision', '--within' => 'within',
+               '--unlock-id' => 'unlock_id'];
     $options = [
         'json' => false, 'read_only' => false, 'all' => false, 'force' => false, 'array_stop' => false,
-        'over_http' => false, 'pim' => false, 'hidden' => false, 'file' => null, 'name' => null,
-        'revision' => null, 'keyfile' => [], 'within' => null,
+        'over_http' => false, 'pim' => false, 'no_pim' => false, 'no_password' => false, 'hidden' => false,
+        'file' => null, 'name' => null, 'revision' => null, 'keyfile' => [], 'within' => null, 'unlock_id' => null,
     ];
     $plain = [];
     while ($args !== []) {
@@ -3581,7 +3832,7 @@ function main(array $argv): int
             case 'idle-check':
                 return minute_check_reported($args, $json);
             case 'cancel-unlock':
-                return command_cancel_unlock($args, $json);
+                return command_cancel_unlock($args, $options['unlock_id'], $json);
             case 'privacy':
                 return command_privacy($args, $json);
             case 'info':
