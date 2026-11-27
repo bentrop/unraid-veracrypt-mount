@@ -50,8 +50,16 @@ Windows, just not on both at once.
   XFS and Btrfs keep Unix owners and permissions, which containers need, but open only
   on Linux. (VeraCrypt on Windows creates only the first three; for the others, create
   the volume with VeraCrypt on Linux.)
-- Not built yet: mounting automatically at array start, locking after a time without
-  activity, and Docker Compose stacks as dependents.
+- **TrueCrypt volumes** (VeraCrypt's predecessor) should open the same way: the unlock
+  recognises both formats by itself. Tested only with cryptsetup's official TrueCrypt
+  sample volumes, not yet with a real TrueCrypt volume holding files. Not supported:
+  volumes from TrueCrypt before 5.0 that use a cipher cascade in CBC mode or Blowfish,
+  which the Linux kernel cannot open. TrueCrypt protects the password far more weakly
+  than VeraCrypt: better copy its files into a new VeraCrypt volume. (VeraCrypt up to
+  version 1.25.9 can also convert one in place: Volumes > Change Volume Password, with
+  "TrueCrypt mode" ticked; later versions dropped TrueCrypt mode.)
+- Not built yet: mounting automatically at array start, and Docker Compose stacks as
+  dependents.
 - A hidden volume has no write protection on Linux: mounting its outer volume
   read-write can overwrite it. Mount the outer volume read-only.
 - FAT32, exFAT and NTFS have no Unix file permissions, so some containers (databases

@@ -1590,6 +1590,15 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
             throw new Fail("Could not unlock: wrong $what,"
                 . ($hidden ? ' no hidden volume inside,' : '') . ' or not a VeraCrypt volume.', CODE_UNLOCK_FAILED);
         }
+        if ($r['code'] === 1) {
+            // The password was right, but the kernel cannot map the volume: on
+            // Bob only TrueCrypt volumes from before 5.0 (cipher cascades in CBC
+            // mode, Blowfish) did this (TC-1).
+            throw new Fail('cryptsetup could not open the volume (its result code was 1). If it is an old '
+                . 'TrueCrypt volume (before version 5.0), Linux cannot open its cipher mode: copy its files '
+                . 'into a new VeraCrypt volume on a PC that can still open it.',
+                CODE_USAGE);
+        }
         throw new Fail("cryptsetup could not open the volume (its result code was {$r['code']}).", CODE_USAGE);
     }
 

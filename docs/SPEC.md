@@ -58,6 +58,8 @@ Nothing needs to be installed on the server.
 
 - VeraCrypt **container files** stored on Unraid shares.
 - Standard and hidden volumes; password, PIM and keyfiles.
+- TrueCrypt container files (TC-1): no extra setting; `cryptsetup tcryptOpen
+  --veracrypt` tries the TrueCrypt and the VeraCrypt key derivation by itself.
 - Inside the volumes, every file system both VeraCrypt and Unraid support (FS-1),
   mounted read-write; FAT32, exFAT and NTFS stay usable on Windows.
 - Several volumes mounted at once.
@@ -384,6 +386,11 @@ The design is in `docs/DESIGN-engine.md`.
   especially) will not run from them.
 - exFAT has no journal and is the more fragile choice after a power cut.
 - Over plain HTTP the volume password crosses the LAN unencrypted.
+- TrueCrypt volumes (TC-1) are tested only with cryptsetup's sample volumes: of its 63
+  TrueCrypt samples, 53 (plain, hidden, keyfiles, every hash, XTS, LRW and single
+  ciphers in CBC) unlocked and mounted on Bob on 2026-11-27 with `scripts/tctest.sh`;
+  the other 10, from TrueCrypt before 5.0 (cipher cascades in CBC mode, Blowfish),
+  are recognised but cannot be mapped by the kernel ("could not open the volume"). Not tested with a real TrueCrypt volume holding files.
 - "No security issues" cannot be guaranteed. The mitigations are a narrow design,
   throwaway test volumes and a separate review.
 
@@ -916,4 +923,5 @@ throwaway containers from `alpine:3.21`, run with `scripts/enginetest.sh`).**
 | 2026-11-15 | Docker control starts with single containers; Compose stacks follow as a later step. |
 | 2026-11-16 | SMB sharing design agreed (one file per share, include line in `smb-unassigned.conf`). Web interface design agreed (`docs/DESIGN-ui.md`), with U1 to U4. |
 | 2026-11-16 | Step 3 of the web interface: shares only with Unraid's "Private" security, per user (SHR-1); dependents reordered by drag and drop as on Unraid's Docker page; a mounted volume cannot be renamed or removed (D3); saving checks the revision so a change in another tab is not overwritten. PRIV-3 extended: ready-to-copy File Activity exclusions. |
+| 2026-11-27 | TrueCrypt volumes supported without a setting of their own (TC-1): the unlock already tries both formats. No TrueCrypt-only password limit (64 bytes) or PIM check: a TrueCrypt volume cannot have a longer password or a PIM, so a wrong entry is simply a wrong password. Documented as tested with sample volumes only. |
 | 2026-11-27 | Default grace period of a new dependent lowered from 60 to 10 seconds, as Docker's own `docker stop`; a dependent that needs longer is killed and reported, so it can be raised. DOC-7 built; DOC-6 later. |
