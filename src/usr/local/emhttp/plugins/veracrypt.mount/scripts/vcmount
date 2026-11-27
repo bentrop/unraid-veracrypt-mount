@@ -208,13 +208,15 @@ function check_config($data, string $source): array
             throw new Fail("$source contains the volume \"$name\" twice.", CODE_USAGE);
         }
         $file = $entry['file'] ?? null;
-        if (!is_string($file) || $file === '' || $file[0] !== '/') {
-            throw new Fail("The volume \"$name\" has no valid path to its volume file.", CODE_USAGE);
+        if (!is_string($file) || !plain_mnt_path($file)) {
+            throw new Fail("The volume \"$name\" has no valid path to its volume file (a file under /mnt/).", CODE_USAGE);
         }
         $display = $entry['display_name'] ?? null;
         $mount_at = $entry['mount_at'] ?? null;
         if (($display !== null && !is_string($display)) || ($mount_at !== null && !is_string($mount_at))
-            || (is_string($display) && (strlen($display) > 100 || preg_match('/[\x00-\x1f]/', $display)))) {
+            || (is_string($display) && (mb_strlen($display, 'UTF-8') > 100 || preg_match('/[\x00-\x1f]/', $display)))
+            || (is_string($mount_at) && $mount_at !== ''
+                && (!plain_mnt_path($mount_at) || strpbrk($mount_at, '\%') !== false))) {
             throw new Fail("The volume \"$name\" has a display name or mount location that is not valid.", CODE_USAGE);
         }
 
@@ -272,7 +274,7 @@ function check_keyfiles(array $keyfiles, string $volume_file): array
         if ($real === false || !str_starts_with($real, '/mnt/') || !is_file($real) || !is_readable($real)) {
             throw new Fail("The keyfile $path cannot be used: it must be a readable file under /mnt/. If it is on a removable drive, connect it first.", CODE_USAGE);
         }
-        if ($real === $volume_file) {
+        if (same_file($real, $volume_file)) {
             throw new Fail('The volume file cannot be its own keyfile.', CODE_USAGE);
         }
         $resolved[] = $real;
@@ -722,8 +724,8 @@ function run_watched(array $command, int $timeout, $stdin, bool $show_errors,
         $write = null;
         $except = null;
         $ready = $cancellable
-            ? stream_select($read, $write, $except, 0, (int) min($left * 1e6, CANCEL_POLL))
-            : stream_select($read, $write, $except, (int) ceil($left));
+            ? @stream_select($read, $write, $except, 0, (int) min($left * 1e6, CANCEL_POLL))
+            : @stream_select($read, $write, $except, (int) ceil($left));
         if ($ready === false) {
             // Interrupted by a signal, or a passing fault: look again. Giving
             // up here would leave proc_close() waiting with no time limit; the
@@ -982,6 +984,9 @@ function share_text(string $name, array $share, string $point, bool $read_only):
         . "\tcomment = VeraCrypt volume\n"
         . "\tbrowseable = " . ($share['export'] === 'hidden' ? 'no' : 'yes') . "\n"
         . "\tguest ok = no\n"
+        // Links inside the volume never lead out of it, whatever Samba's
+        // global settings say (audit S9).
+        . "\twide links = no\n"
         . "\tvalid users = " . implode(' ', array_keys($share['users'])) . "\n"
         . "\tread only = yes\n"
         . ($read_only || $writers === [] ? '' : "\twrite list = " . implode(' ', $writers) . "\n")
@@ -1005,6 +1010,10 @@ function share_active(string $name): bool
  */
 function add_share(string $name, array $share, string $point, bool $read_only): void
 {
+    // Samba gives these section names a special meaning (audit S9).
+    if (in_array(strtolower($name), ['global', 'homes', 'printers', 'print$', 'ipc$'], true)) {
+        throw new Fail("No share for \"$name\": Samba reserves that name. Rename the volume to share it.", CODE_SHARE);
+    }
     if (!smb_enabled()) {
         throw new Fail("No share for \"$name\": SMB is turned off in Unraid's settings.", CODE_SHARE);
     }
@@ -1191,14 +1200,37 @@ function same_file(string $one, string $two): bool
 }
 
 /** Refuse a mount point that is not safe to use. Creates nothing. */
+/**
+ * Is this a plain path below /mnt/: absolute, no empty, "." or ".." parts, no
+ * trailing slash, no control characters, not too long? Used for volume files
+ * and mount locations (audit S1, S3); keyfiles have their own check.
+ */
+function plain_mnt_path(string $path): bool
+{
+    return str_starts_with($path, '/mnt/') && strlen($path) <= 4096
+        && !str_ends_with($path, '/') && strpos($path, '//') === false
+        && !preg_match('#/\.\.?(/|\z)#', $path) && !preg_match('/[\x00-\x1f\x7f]/', $path);
+}
+
 function check_mount_point(string $point): void
 {
-    if (!preg_match('#\A/mnt/[^/]+/[^/]+#', $point) || strpos($point, '//') !== false
-        || preg_match('#/\.\.?(/|\z)#', $point)) {
+    // A backslash or % would also break the share's Samba section (audit S9).
+    if (!plain_mnt_path($point) || !preg_match('#\A/mnt/[^/]+/[^/]+#', $point) || strpbrk($point, '\%') !== false) {
         throw new Fail("The mount location $point is not valid. It must be a folder below /mnt/<something>/.", CODE_USAGE);
     }
-    if (is_link($point)) {
-        throw new Fail("Refused: the mount location $point is a link.", CODE_REFUSED);
+    // No part of the path may be a link, or root would create folders and
+    // mount wherever the link points (audit S1). Parts that do not exist yet
+    // are created by mkdir below, under the last existing one.
+    $parts = explode('/', substr($point, 1));
+    $path = '';
+    foreach ($parts as $part) {
+        $path .= '/' . $part;
+        if (is_link($path)) {
+            throw new Fail("Refused: the mount location $point goes through a link ($path).", CODE_REFUSED);
+        }
+        if (!file_exists($path)) {
+            break;
+        }
     }
     if (!file_exists($point)) {
         return;
@@ -1234,9 +1266,11 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
                   array $keyfiles = [], bool $pim = false, bool $hidden = false): void
 {
     @unlink(CANCEL_FILE);   // an old cancel must not stop this unlock
-    $real = realpath($file);
-    if ($real === false || !is_file($real)) {
-        throw new Fail("The volume file $file does not exist or is not an ordinary file.", CODE_USAGE);
+    // One message for every refusal, so it does not tell which files exist
+    // elsewhere on the server (audit S3, as for keyfiles).
+    $real = plain_mnt_path($file) ? realpath($file) : false;
+    if ($real === false || !str_starts_with($real, '/mnt/') || !is_file($real)) {
+        throw new Fail("The volume file $file cannot be used: it must be an ordinary file under /mnt/.", CODE_USAGE);
     }
     $keyfiles = check_keyfiles($keyfiles, $real);
     $mapper = MAPPER_PREFIX . $name;
@@ -1333,12 +1367,27 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
         );
     }
 
+    // Unlocking can take minutes. Look again at what may have changed
+    // meanwhile: the mount location (audit S1) and a network client opening
+    // the volume file (VOL-7, audit S12).
+    try {
+        check_mount_point($point);
+        $client = network_open($real) ?? ($real === $file ? null : network_open($file));
+        if ($client !== null) {
+            throw new Fail("Refused: the volume file was opened over the network ($client) while it was being unlocked.", CODE_REFUSED);
+        }
+    } catch (Fail $e) {
+        $locked = lock_again($mapper);
+        throw new Fail($e->getMessage() . ($locked ? ' The volume was locked again.' : ' The volume could NOT be locked again.'), $e->getCode());
+    }
+
     // Mount. Never with the "force" option.
     $created = false;
     if (!is_dir($point)) {
         if (!@mkdir($point, 0755, true)) {
-            lock_again($mapper);
-            throw new Fail("Could not create the mount location $point. The volume was locked again.", CODE_FILESYSTEM);
+            $locked = lock_again($mapper);
+            throw new Fail("Could not create the mount location $point. "
+                . ($locked ? 'The volume was locked again.' : 'The volume could NOT be locked again.'), CODE_FILESYSTEM);
         }
         $created = true;
     }
@@ -1492,7 +1541,18 @@ function command_mount(array $args, array $options, bool $json): int
 /** How a program is named to the user: its name and process number. */
 function program_label(string $proc_dir): string
 {
-    return trim((string) @file_get_contents("$proc_dir/comm")) . ' (process ' . basename($proc_dir) . ')';
+    // A program chooses its own name: keep only plain characters (audit S6).
+    $comm = preg_replace('/[^A-Za-z0-9 ._+:@\/-]/', '?', trim((string) @file_get_contents("$proc_dir/comm")));
+    return $comm . ' (process ' . basename($proc_dir) . ')';
+}
+
+/**
+ * Names for a log line, each in double quotes, so that log_event() leaves
+ * them out unless "Show volume names in logs" is on (PRIV-1, audit S6).
+ */
+function quoted_list(array $names): string
+{
+    return implode(', ', array_map(fn($n) => '"' . $n . '"', $names));
 }
 
 /**
@@ -1659,7 +1719,7 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
             if ($ended !== []) {
                 $notes[] = 'Forced: ended ' . implode(', ', $ended) . '.';
                 if ($saved) {
-                    log_event("dismount of \"$name\" forced: ended " . implode(', ', $ended), true);
+                    log_event("dismount of \"$name\" forced: ended " . quoted_list($ended), true);
                 }
                 $r = run([program('umount'), $point], TOOL_TIMEOUT);
             }
@@ -1676,7 +1736,7 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
                 // Program names and process numbers only, never file names.
                 log_event(
                     "dismount of \"$name\" aborted: still in use"
-                    . ($programs === [] ? '' : ' by ' . implode(', ', $programs)),
+                    . ($programs === [] ? '' : ' by ' . quoted_list($programs)),
                     true
                 );
             }
@@ -2243,9 +2303,16 @@ function share_can_write(string $dir): bool
         return false;
     }
     $mode = $st['mode'];
-    return ($st['uid'] === SHARE_UID && ($mode & 0300) === 0300)
-        || ($st['gid'] === SHARE_GID && ($mode & 0030) === 0030)
-        || ($mode & 0003) === 0003;
+    // As the kernel decides: the owner's bits if nobody owns it, else the
+    // group's if it belongs to users, else everyone's. Samba needs read,
+    // write and enter (audit B3).
+    if ($st['uid'] === SHARE_UID) {
+        return ($mode & 0700) === 0700;
+    }
+    if ($st['gid'] === SHARE_GID) {
+        return ($mode & 0070) === 0070;
+    }
+    return ($mode & 0007) === 0007;
 }
 
 /**
@@ -2297,8 +2364,10 @@ function command_fix_top(array $args, bool $json): int
     if (count($args) !== 1) {
         throw new Fail('Usage: vcmount fix-top <name>', CODE_USAGE);
     }
-    $point = owner_fs_point($args[0]);
+    // The lock first, so the volume cannot be dismounted between the check
+    // that it is mounted and the change (audit S7).
     $lock = take_lock();
+    $point = owner_fs_point($args[0]);
     if (!@chown($point, SHARE_UID) || !@chgrp($point, SHARE_GID) || !@chmod($point, 0777)) {
         throw new Fail("Could not change the top folder $point.", CODE_USAGE);
     }
@@ -2320,6 +2389,7 @@ function command_fix_permissions(array $args, bool $json): int
     if (count($args) !== 1) {
         throw new Fail('Usage: vcmount fix-permissions <name>', CODE_USAGE);
     }
+    $lock = take_lock();   // as fix-top (audit S7)
     $point = owner_fs_point($args[0]);
     $tool = '/usr/local/sbin/newperms';
     if (!is_executable($tool)) {

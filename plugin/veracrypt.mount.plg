@@ -2,8 +2,8 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "veracrypt.mount">
 <!ENTITY author    "bentrop">
-<!ENTITY version   "2026.11.27a">
-<!ENTITY sha256    "f91cf1076af52cf71dfb1b95aaf7ebb01c310d291c40c8d1ec64b613cd6abbf1">
+<!ENTITY version   "2026.11.27b">
+<!ENTITY sha256    "3edb0ccef5c43933adf96d3bfb29020150ed60d01f9428f644e7ec9471ad53d5">
 <!ENTITY launch    "Settings/VeraCryptMount">
 <!ENTITY gitURL    "https://github.com/bentrop/unraid-veracrypt-mount">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/&name;.plg">

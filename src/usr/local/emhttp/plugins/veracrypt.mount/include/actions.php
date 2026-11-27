@@ -90,7 +90,7 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
             } else {
                 // Mount without saving (VOL-5).
                 $file = $post['file'] ?? null;
-                if (!is_string($file) || $file === '' || $file[0] !== '/' || strlen($file) > 4096
+                if (!is_string($file) || !str_starts_with($file, '/mnt/') || strlen($file) > 4096
                     || preg_match('/[\x00-\x1f]/', $file)) {
                     return vcm_refuse('That is not a valid path to a volume file.');
                 }

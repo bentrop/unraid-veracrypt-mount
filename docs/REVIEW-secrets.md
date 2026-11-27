@@ -831,3 +831,31 @@ C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be docum
 - **Tested on Bob** by the owner: switching the setting in either direction took effect
   at once, for "Mount a file once" and for saved volumes.
 
+## 11. External audit (2026-11-27)
+
+- **Who and how:** Gemini in Google's Antigravity, on a fresh clone of the public
+  repository at commit `1d83816`, reading only. The full report is
+  [`AUDIT-2026-11-27.md`](AUDIT-2026-11-27.md): 13 security findings (S1-S13) and 17
+  bug groups (B1-B17).
+- **Verdict:** no way for a password or PIM to leak, no way in without Unraid's login,
+  the repository and its history hold no secrets, and the release pipeline is sound.
+  Spot checks of its main claims (B1, B3, S2) against the code confirmed them.
+- **Fixed in the first batch:**
+  - S1: mount locations must be plain paths below `/mnt/` (no trailing slash, no
+    backslash or `%`), no part of the path may be a link, and the location is checked
+    again after the minutes an unlock can take.
+  - S3: volume files must be ordinary files under `/mnt/`, checked before and after
+    resolving links, with one message for every refusal.
+  - S4: Cancel during the pre-send HTTPS check drops the check; nothing is sent.
+  - S6: program names in log lines are quoted, so they are hidden with the volume
+    names; program names are reduced to plain characters.
+  - S7: "Let the share write" and "Fix permissions" take the engine lock before they
+    check that the volume is mounted.
+  - S9: Samba's reserved names are refused as share names; shares get
+    `wide links = no`.
+  - S12 (part): a network client opening the volume file during the unlock is caught
+    before the mount.
+  - B1, B2, B3, B13 (parts), B15 (1, 2, 4): see the report.
+- **Open:** S2, S5, S8 and B4, B5, B7 need a plan and tests on Bob; the rest is listed
+  in the report for later.
+

@@ -1,7 +1,7 @@
 /*
  * vcsettings.js: the behaviour of the Settings tab (docs/DESIGN-ui.md).
  *
- * The three settings are read with the action "config" and saved with
+ * The settings are read with the action "config" and saved with
  * "save-config", together with the volume list exactly as it was read. The
  * revision makes the engine refuse the save if the file changed meanwhile.
  */
@@ -60,9 +60,26 @@
         if (!config) { return; }
         var settings = {};
         $.each(FIELDS, function (key, field) { settings[key] = $(field).val() === 'yes'; });
+        $('#vcs-apply, #vcs-done').prop('disabled', true);
+        // The Volumes tab shares this page and may have saved volumes since
+        // this tab read them (audit B2). Save the chosen settings together with
+        // the volumes as they are now.
+        act({ action: 'config' }).then(function (c) {
+            if (!c.ok) {
+                $('#vcs-done').prop('disabled', false);
+                $('#vcs-apply').prop('disabled', false);
+                error(c.error || 'The settings could not be read.');
+                return;
+            }
+            config.volumes = c.volumes;
+            config.revision = c.revision;
+            save(settings);
+        });
+    }
+
+    function save(settings) {
         var data = { action: 'save-config', revision: config.revision,
                      config: JSON.stringify({ settings: settings, volumes: config.volumes }) };
-        $('#vcs-apply, #vcs-done').prop('disabled', true);
         act(data).then(function (a) {
             $('#vcs-done').prop('disabled', false);
             if (!a.ok) {

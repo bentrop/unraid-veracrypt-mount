@@ -28,7 +28,7 @@
     var progressTimer = null;    // ticks the unlock progress once a second
     var UNLOCK_LIMIT = 180;      // seconds; the engine's UNLOCK_TIMEOUT
     var PIM_WARN = 2000;         // above this a PIM takes over four times VeraCrypt's default (485)
-    var dismounting = {};        // volumes this page is dismounting now: shown busy, a second click is ignored
+    var dismounting = Object.create(null);   // volumes this page is dismounting now: shown busy, a second click is ignored
     var mountQueue = [];         // the volumes "Mount all" still has to ask for
     var inQueue = false;         // the dialog is part of "Mount all"
 
@@ -538,6 +538,7 @@
 
     function openDialog(name, checked) {
         busyWatch++;
+        checkingHttp = 0;
         if (overHttp && !checked) {
             freshHttpsSetting(function () { openDialog(name, true); });
             return;
@@ -743,15 +744,25 @@
     }
 
     function mounted(a) {
+        // Cancel was clicked, but the password had already been accepted: the
+        // mount went ahead, as designed (UI-8). Say so instead of staying quiet.
+        var late = cancelling;
         mounting = false;
         stopProgress();
         closeDialog();
         var notes = [];
+        if (late) {
+            notes.push('The password had already been accepted when Cancel arrived, so "' + esc(mountLabel)
+                + '" is mounted. Dismount it if you did not want it.');
+        }
         if (a.share_error) { notes.push(esc(a.share_error)); }
         (a.failed_dependents || []).forEach(function (f) {
             notes.push('Dependent ' + esc(f.container) + ' could not be started: ' + esc(f.reason));
         });
-        if (notes.length) { message('Mounted, with problems', notes.join('<br>'), 'warning'); }
+        if (notes.length) {
+            var problems = notes.length > (late ? 1 : 0);
+            message(late ? 'Mounted anyway' : 'Mounted, with problems', notes.join('<br><br>'), problems ? 'warning' : 'info');
+        }
         refresh();
         var next = function () { if (inQueue) { nextInQueue(); } };
         if (a.top_folder_blocked && !notes.length) { askTopFolder(a.volume, next); } else { next(); }
@@ -813,17 +824,24 @@
         }());
     }
 
+    var mountLabel = '';       // the name of the volume being mounted, for messages
     var httpChecked = false;   // the setting was asked for right before this send
+    var checkingHttp = 0;      // a pending pre-send check; Cancel drops it (audit S4)
+    var httpCheckSeq = 0;
 
     function submitMount(event) {
         if (event) { event.preventDefault(); }
-        if (mounting || passwordBlocked()) { return; }   // never send a password the setting forbids
+        if (mounting || checkingHttp || passwordBlocked()) { return; }   // never send a password the setting forbids
         // Over plain HTTP, ask once more right before the password leaves the
         // browser; if the setting is on now, show the HTTPS notice instead.
+        // Cancel during this check drops it, and nothing is sent.
         if (overHttp && !httpChecked) {
-            mounting = true;
+            var id = checkingHttp = ++httpCheckSeq;
+            $('#vcm-mount-submit').prop('disabled', true);
             freshHttpsSetting(function () {
-                mounting = false;
+                if (checkingHttp !== id) { return; }
+                checkingHttp = 0;
+                $('#vcm-mount-submit').prop('disabled', false);
                 if (passwordBlocked()) {
                     $('#vcm-password, #vcm-pim').val('');
                     openDialog(mountTarget, true);
@@ -846,6 +864,13 @@
             data.file = $.trim($('#vcm-file').val());
             data.read_only = $('#vcm-read-only').is(':checked') ? '1' : '0';
             data.hidden = $('#vcm-hidden').is(':checked') ? '1' : '0';
+            // Checked here, so a missing field does not cost the typed password.
+            if (data.file.indexOf('/mnt/') !== 0) { dialogError('Choose the volume file, under /mnt/.'); $('#vcm-file').trigger('focus'); return; }
+            if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(data.name)) {
+                dialogError('Enter a name: letters, digits, - and _, starting with a letter or digit.');
+                $('#vcm-name').trigger('focus');
+                return;
+            }
             if ($('#vcm-use-keyfiles').is(':checked')) {
                 var ks = keyfilePaths('#vcm-keyfiles');
                 if (!ks.length) { dialogError('Choose a keyfile, or untick "Use keyfiles".'); return; }
@@ -887,6 +912,7 @@
         pimField.val('');
         pim = null;
         $('#vcm-mount-error').prop('hidden', true);
+        mountLabel = once ? data.name : ((v && v.display_name) || mountTarget);
         $('#vcm-mount-submit').prop('disabled', true).val('Unlocking…');
         startProgress(withPim);
 
@@ -1254,7 +1280,7 @@
             var users = (options.users || []).slice();
             Object.keys(given).forEach(function (u) { if (users.indexOf(u) < 0) { users.push(u); } });
             $('#e-users').html(users.length
-                ? users.map(function (u) { return userRow(u, given[u] || 'none'); }).join('')
+                ? users.map(function (u) { return userRow(u, Object.prototype.hasOwnProperty.call(given, u) ? given[u] : 'none'); }).join('')
                 : '<tr><td colspan="2" class="vcm-empty">There are no Unraid users. Add one under Users first.</td></tr>');
 
             $('#e-deps').empty();
@@ -1427,7 +1453,10 @@
         $('#vcm-once').on('click', function () { stopQueue(); openDialog(null); });
         $('#vcm-dismount-all').on('click', dismountAll);
         $('#vcm-cancel').on('click', function () {
-            if (mounting) { cancelUnlock(); return; }
+            if (checkingHttp) {   // nothing has been sent yet: just close
+                checkingHttp = 0;
+                $('#vcm-mount-submit').prop('disabled', false);
+            } else if (mounting) { cancelUnlock(); return; }
             stopQueue(); closeDialog(); refresh();
         });
         $('#vcm-skip').on('click', function () { closeDialog(); nextInQueue(); });
