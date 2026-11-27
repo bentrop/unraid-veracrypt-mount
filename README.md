@@ -47,8 +47,10 @@ Mounting a volume that needs a PIM and a keyfile.
   folder.
 - **Safe dismount:** before the array stops or the server shuts down, the dependents
   are stopped and every volume is dismounted. A normal dismount never takes a volume
-  away from a program or a computer that still uses it, a file open over the network
-  included: it stops and says who holds it, and nothing is changed. You can then force
+  away from a program or a computer that still uses it: with a file open over the
+  network it stops before changing anything; with a program on the server it stops,
+  says who holds it, and gives the volume back its share and the dependents it had just
+  stopped. You can then force
   it (one confirmation, which names what forcing ends). At array stop force is on by
   default, so a busy volume cannot hold up the stop.
 - **Protection against double use:** a volume is not mounted while a computer has its

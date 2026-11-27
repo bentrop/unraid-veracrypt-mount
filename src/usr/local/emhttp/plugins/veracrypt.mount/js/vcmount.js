@@ -733,6 +733,7 @@
         act({ action: 'list' }).then(function (a) {
             httpsRequired = a.ok && a.settings ? !!a.settings.require_https : true;
             if (a.ok && Array.isArray(a.volumes)) { lastVolumes = a.volumes; }   // the newest list for the dialog
+            if (a.ok && a.server) { server = a.server; }
             next();
         });
     }
@@ -1102,7 +1103,7 @@
             freshHttpsSetting(function () {
                 if (checkingHttp !== id) { return; }
                 checkingHttp = 0;
-                $('#vcm-mount-submit').prop('disabled', false);
+                $('#vcm-mount-submit, #vcm-skip').prop('disabled', false);
                 if (passwordBlocked()) {
                     $('#vcm-password, #vcm-pim').val('');
                     openDialog(mountTarget, true);
@@ -1277,7 +1278,8 @@
             // share, and the computers using it, are affected too (audit
             // 2026-11-27c S3).
             var vol = lastVolumes.filter(function (x) { return x.name === name; })[0];
-            var inShare = !!(vol && vol.mount_at && vol.mount_at.indexOf('/mnt/user/') === 0);
+            var at = vol && (vol.mounted_at || vol.mount_at);
+            var inShare = !!(at && at.indexOf('/mnt/user/') === 0);
             swal({
                 title: esc(name) + ' is still in use',
                 text: 'It stays mounted; nothing was forced.' + heldBy(a)
@@ -1759,7 +1761,11 @@
             checkPrivacy();
             // A mounted volume's share follows the new settings at once, as
             // the Edit panel says (audit 2026-11-27c, Part 3).
-            act({ action: 'repair-shares' });
+            act({ action: 'repair-shares' }).then(function (r) {
+                if (r && r.ok === false) {
+                    message('Share not updated', esc(r.error || 'The share could not be changed.'), 'warning');
+                }
+            });
             editError('');
             after();
         });
@@ -1787,7 +1793,7 @@
         swal({
             title: 'Discard your changes?', text: 'They have not been saved. Use ' + (editing ? 'Apply' : 'Add Volume') + ' to save them.',
             type: 'warning', showCancelButton: true, confirmButtonText: 'Discard'
-        }, closeEdit);
+        }, function (yes) { if (yes) { closeEdit(); } });
     }
 
     function remove() {

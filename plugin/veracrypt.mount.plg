@@ -112,7 +112,7 @@ echo ""
 <INLINE>
 E=/usr/local/emhttp/plugins/&name;/scripts/vcmount
 set -- /dev/mapper/vcm-*
-if [ -e "$1" ]; then
+if [ -e "$1" ] || [ -L "$1" ]; then
   echo "Not removed: $# volume(s) still unlocked or mounted. Dismount all volumes first (Dismount all on the Volumes tab), then remove the plugin again."
   exit 1
 fi
@@ -122,7 +122,11 @@ if [ -x "$E" ] &amp;&amp; "$E" busy --json 2&gt;/dev/null | grep -q "\"busy\":tr
 fi
 rm -f &flash;/&name;.cron
 /usr/local/sbin/update_cron
-[ -x "$E" ] &amp;&amp; "$E" repair-shares &gt;/dev/null 2&gt;&amp;1
+if ! { [ -x "$E" ] &amp;&amp; "$E" repair-shares &gt;/dev/null 2&gt;&amp;1; }; then
+  rm -f /etc/samba/veracrypt-shares/*.conf
+  [ -f /etc/samba/smb-unassigned.conf ] &amp;&amp; sed -i '\#/etc/samba/veracrypt-shares/#d' /etc/samba/smb-unassigned.conf
+  smbcontrol smbd reload-config &gt;/dev/null 2&gt;&amp;1
+fi
 removepkg &name;
 rmdir /etc/samba/veracrypt-shares 2&gt;/dev/null
 rm -f &flash;/&name;-*.txz

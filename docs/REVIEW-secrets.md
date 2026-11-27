@@ -1056,3 +1056,21 @@ containers.
 - **Not tested on Bob:** keyfile-only volume with a PIM (no such test volume);
   container mount propagation for volumes inside a share (S3.2 is a warning only);
   removal refusing while mounted (needs the full install, phase 2).
+
+## 16. Follow-up audit (2026-11-27d)
+
+Neon reviewed `b69c8f6..8eb45d7` (release 2026.11.27v), report only
+(`docs/AUDIT-2026-11-27d.md`). Verdict: clean for a public beta; no critical, high or
+medium security finding; the password handover by reference (S6) verified sound;
+every earlier finding fixed or explicitly accepted. Eight small findings, all fixed:
+the second round of the forced dismount reports only containers Docker confirms as
+stopped, forces nothing after a refusal and logs a volume left for lack of time (F1);
+a busy normal dismount restarts only the dependents it stopped (F2); a stop request
+dated in the future is ignored (F3); removal counts a dangling link and cleans our
+share lines itself if the engine cannot (F4); log lines of a same-named dependent stay
+in the volume's information (F5); four page slips (F6); "settings changed" reaches the
+page as written (F7); one stale test line and one stale design line (F8). Tested on
+Bob: engine tests busy, dismount-all, force, dependents; action tests config, mount;
+F2 with one dependent stopped by hand; three busy volumes in 17 of 22 seconds.
+Open from its server list: a keyfile-only volume with a PIM; the forum support URL
+for Community Applications.

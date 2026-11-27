@@ -1000,8 +1000,13 @@ function stop_requested(): bool
         return true;
     }
     $asked = read_marker(STOP_FILE);
-    return $asked !== null && preg_match('/\A[0-9]+\z/', trim($asked)) === 1
-        && (int) trim($asked) >= $GLOBALS['vcm_started'];
+    if ($asked === null || preg_match('/\A[0-9]+\z/', trim($asked)) !== 1) {
+        return false;
+    }
+    // A time after now means the clock was set back since: not a stop asked
+    // for during this run (audit 2026-11-27d F3).
+    $at = (int) trim($asked);
+    return $at >= $GLOBALS['vcm_started'] && $at <= time();
 }
 
 /** For timing tests only: with VCMOUNT_TRACE=1, note a step on standard error. */
@@ -1948,7 +1953,7 @@ function command_mount(array $args, array $options, bool $json): int
     // A save between reading the settings and taking the lock: start again
     // with the new ones (audit 2026-11-27c S8).
     if ($saved && (load_config()[$name] ?? null) !== $volume) {
-        throw new Fail("The settings of \"$name\" changed just now. Try again.", CODE_IN_PROGRESS);
+        throw new Fail("The settings of \"$name\" changed just now. Try again.", CODE_REFUSED);
     }
     // Catch stop signals across the whole mount so a signal never cuts off the
     // engine between unlocking, mounting, sharing and starting dependents
@@ -2360,7 +2365,8 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force, bo
     }
 
     // Then the dependents, in reverse order (DOC-4, DOC-5).
-    $notes = array_merge($notes, array_column(stop_dependents($name, $volume['dependents'] ?? []), 'message'));
+    $stopped_deps = stop_dependents($name, $volume['dependents'] ?? []);
+    $notes = array_merge($notes, array_column($stopped_deps, 'message'));
 
     // Dismount. A volume can be mounted in more than one place; take them all.
     for ($round = 0; $round < 5 && $live !== null && $live['mounted_at'] !== null; $round++) {
@@ -2407,7 +2413,8 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force, bo
             // the array or Docker is being stopped.
             $back = '';
             if (!$force && !$first_pass && $saved && !stop_requested() && array_started()) {
-                $back = restore_after_busy($name, $volume, $point, !empty($live['read_only']));
+                $back = restore_after_busy($name, $volume, $point, !empty($live['read_only']),
+                                           array_column($stopped_deps, 'container'));
             }
             $fail = new Fail(
                 "Dismount aborted: \"$name\" is still in use. It stays mounted"
@@ -2449,7 +2456,7 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force, bo
         }
     }
     if (!$locked) {
-        if ($saved) {
+        if ($saved && !$first_pass) {
             log_event("\"$name\" was dismounted but could not be locked", true);
         }
         $fail = new Fail("\"$name\" was dismounted, but it could not be locked. Try again.", CODE_BUSY);
@@ -2498,6 +2505,7 @@ function force_busy_volumes(array $names, array $config): array
         }
     }
     $refused = null;
+    $done_ids = [];     // containers Docker reports as stopped
     if (!out_of_time(5)) {
         try {
             // Only what still runs is ended; labels of the others are dropped.
@@ -2506,9 +2514,16 @@ function force_busy_volumes(array $names, array $config): array
             $gone = [];
             $refused = $e;   // started from inside a volume: nothing was ended
         }
-        if ($containers !== [] && !out_of_time(5)) {
+        // Not after a refusal: then nothing is forced (audit 2026-11-27d F1).
+        if ($containers !== [] && $refused === null && !out_of_time(5)) {
             $wait = fitting(FORCE_WAIT, 5);
             run(array_merge([program('docker'), 'stop', '-t', (string) $wait], array_keys($containers)), $wait + 30);
+            // Report only what Docker confirms (audit B12).
+            foreach (array_keys($containers) as $id) {
+                if (container_running((string) $id) === false) {
+                    $done_ids[(string) $id] = true;
+                }
+            }
         }
     } else {
         $gone = [];
@@ -2525,10 +2540,25 @@ function force_busy_volumes(array $names, array $config): array
                 log_event("dismount of \"$name\" forced: ended " . quoted_list($mine), true);
             }
         }
-        if (($stopped[$name] ?? []) !== []) {
-            $notes[] = 'Forced: stopped ' . implode(', ', array_map(fn($c) => "\"$c\"", $stopped[$name])) . '.';
+        $ok = [];
+        $not = [];
+        foreach ($stopped[$name] ?? [] as $id => $label) {
+            if (isset($done_ids[(string) $id])) {
+                $ok[] = "\"$label\"";
+            } else {
+                $not[] = "\"$label\"";
+            }
+        }
+        if ($ok !== []) {
+            $notes[] = 'Forced: stopped ' . implode(', ', $ok) . '.';
             if ($volume !== null) {
-                log_event("dismount of \"$name\" forced: stopped " . implode(', ', array_map(fn($c) => "\"$c\"", $stopped[$name])), true);
+                log_event("dismount of \"$name\" forced: stopped " . implode(', ', $ok), true);
+            }
+        }
+        if ($not !== []) {
+            $notes[] = 'Could not stop ' . implode(', ', $not) . '.';
+            if ($volume !== null) {
+                log_event("dismount of \"$name\" forced: could not stop " . implode(', ', $not), true);
             }
         }
         try {
@@ -2537,6 +2567,9 @@ function force_busy_volumes(array $names, array $config): array
             }
             // What held it has ended, so this is quick.
             if (out_of_time(2)) {
+                if ($volume !== null) {
+                    log_event("dismount of \"$name\" was not finished: no time was left", true);
+                }
                 throw new Fail("\"$name\" was left mounted: no time was left.", CODE_BUSY);
             }
             trace("forced round: $name");
@@ -2555,8 +2588,13 @@ function force_busy_volumes(array $names, array $config): array
  * again and start its dependents again, as they were before (audit
  * 2026-11-27c B2). Returns a sentence for the message, or ''.
  */
-function restore_after_busy(string $name, array $volume, string $point, bool $read_only): string
+function restore_after_busy(string $name, array $volume, string $point, bool $read_only, array $were_running): string
 {
+    // Only the dependents this dismount stopped; one stopped before stays
+    // stopped (audit 2026-11-27d F2).
+    $volume['dependents'] = array_values(array_filter(
+        $volume['dependents'], fn($d) => in_array($d['container'], $were_running, true)
+    ));
     $done = [];
     if ($volume['share'] !== null) {
         try {
@@ -3851,7 +3889,7 @@ function volume_log_lines(string $name): array
         // Not the lines about a container that happens to share the
         // volume's name (audit 2026-11-27c B7).
         if (strpos($line, 'veracrypt.mount') !== false && strpos($line, $needle) !== false
-            && strpos($line, 'dependent ' . $needle) === false && strpos($line, 'container ' . $needle) === false) {
+            && (strpos($line, 'dependent ' . $needle) === false || strpos($line, 'of ' . $needle) !== false)) {
             $lines[] = rtrim($line, "\n");
             if (count($lines) > INFO_LOG_LINES) {
                 array_shift($lines);

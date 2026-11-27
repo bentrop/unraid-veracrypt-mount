@@ -584,7 +584,7 @@ stop-check)
     step "Checks"
     has_text 'dependent "vcm-test-stubborn" of "deps-test" did not stop within 5 seconds and was killed' \
         "$new_lines" "stopping_docker: the stubborn dependent was killed after its grace period"
-    has_text "dismount of \"deps-test\" forced: ended sleep (process $old_holder)" \
+    has_text "dismount of \"deps-test\" forced: ended \"sleep (process $old_holder)\"" \
         "$new_lines" "unmounting_disks: the dismount was forced and ended the sleep"
     has_text 'dismounted "deps-test"' "$new_lines" "unmounting_disks: the volume was dismounted"
     case "$new_lines" in
