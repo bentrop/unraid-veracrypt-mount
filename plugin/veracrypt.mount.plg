@@ -2,8 +2,8 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "veracrypt.mount">
 <!ENTITY author    "bentrop">
-<!ENTITY version   "2026.11.27n">
-<!ENTITY sha256    "f977ea8f245c059a31beed4c4812fb8ffd23f46fbe1790ce8e88f10349b3bf0d">
+<!ENTITY version   "2026.11.27o">
+<!ENTITY sha256    "4d0f409b64c5e5af7677ebdfa5002cd706687d5870c90a7c07fd211883b6bbf1">
 <!ENTITY launch    "Settings/VeraCryptMount">
 <!ENTITY gitURL    "https://github.com/bentrop/unraid-veracrypt-mount">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/&name;.plg">
@@ -55,8 +55,8 @@ rm -f &flash;/&name;.cron
 
 <FILE Name="&flash;/&name;.cron">
 <INLINE>
-# VeraCrypt Mount: lock volumes that were idle for their set time
-* * * * * /usr/local/emhttp/plugins/&name;/scripts/vcmount idle-check &gt;/dev/null 2&gt;&amp;1
+# VeraCrypt Mount: stop dependents of locked volumes, lock idle volumes
+* * * * * /usr/local/emhttp/plugins/&name;/scripts/vcmount check &gt;/dev/null 2&gt;&amp;1
 </INLINE>
 </FILE>
 
@@ -67,7 +67,7 @@ rm -f &flash;/&name;.cron
 <FILE Run="/bin/bash">
 <INLINE>
 /usr/local/sbin/update_cron
-if ! grep -qF 'vcmount idle-check' /etc/cron.d/root 2&gt;/dev/null; then
+if ! grep -qF 'vcmount check' /etc/cron.d/root 2&gt;/dev/null; then
   { cat /etc/cron.d/root 2&gt;/dev/null; cat &flash;/&name;.cron; } | crontab -c /etc/cron.d -
 fi
 </INLINE>
