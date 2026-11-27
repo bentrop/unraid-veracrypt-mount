@@ -2,8 +2,8 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "veracrypt.mount">
 <!ENTITY author    "bentrop">
-<!ENTITY version   "2026.11.27l">
-<!ENTITY sha256    "fed5e4be3f548f4aad6d6046c3238d60bd0821019c787a84c1e0516b7be084b5">
+<!ENTITY version   "2026.11.27n">
+<!ENTITY sha256    "f977ea8f245c059a31beed4c4812fb8ffd23f46fbe1790ce8e88f10349b3bf0d">
 <!ENTITY launch    "Settings/VeraCryptMount">
 <!ENTITY gitURL    "https://github.com/bentrop/unraid-veracrypt-mount">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/&name;.plg">
@@ -45,6 +45,14 @@ true
      collects the *.cron files of installed plugins from their folder on the
      flash drive into the system's job list, as for its own plugins. The check
      does nothing unless a volume has "Lock when idle" ticked. -->
+<FILE Run="/bin/bash">
+<INLINE>
+# The plugin manager never overwrites an existing file, so a changed line
+# would not arrive with an update. Remove the old one first.
+rm -f &flash;/&name;.cron
+</INLINE>
+</FILE>
+
 <FILE Name="&flash;/&name;.cron">
 <INLINE>
 # VeraCrypt Mount: lock volumes that were idle for their set time
