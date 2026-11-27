@@ -97,6 +97,9 @@
            border: 1px solid rgba(128, 128, 128, .25); border-radius: 4px; margin-bottom: 4px; }
 .vcm-dep input[type=number] { width: 4.5em; }
 .vcm-dep-name { min-width: 160px; font-weight: bold; }
+/* In the free space on the right, before the remove link. */
+.vcm-dep-alone { margin-left: auto; cursor: help; }
+.vcm-dep-alone + .vcm-dep-remove { margin-left: 0; }
 .vcm-handle { cursor: grab; opacity: .6; }
 /* The empty place a dragged dependent will drop into. */
 .vcm-dep.vcm-dep-gap { visibility: visible !important; border-style: dashed; opacity: .5; }
@@ -167,6 +170,7 @@ table.vcm-main .vcm-tile-icon { margin-right: 6px; }
 /* A volume being dismounted: its control spins and cannot be clicked. */
 .vcm-busy-icon { margin: 0 6px 0 2px; opacity: .7; }
 .vcm-tile-icon.vcm-busy { color: #d08a00; cursor: progress; }
+.vcm-info-list a.vcm-busy { opacity: .5; cursor: progress; }
 
 /* The Volumes tab: Unraid's table style, five columns of two lines each. */
 /* Unraid's disk_status rules right-align from the third column on; these win

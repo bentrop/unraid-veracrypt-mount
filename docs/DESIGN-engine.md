@@ -195,7 +195,7 @@ locked with the same command.
 
 **Configuration.** A saved volume has an ordered list `dependents`. Each entry has
 `container` (the name of the Docker container), `grace` (seconds it gets to stop by
-itself, default 60) and `delay` (seconds to wait after starting it, default 0). Compose
+itself, default 10) and `delay` (seconds to wait after starting it, default 0). Compose
 stacks come later.
 
 **On mount (DOC-3).** After the volume is mounted, the dependents are started in list

@@ -183,16 +183,23 @@ Nothing needs to be installed on the server.
   volume stays mounted, the remaining dependents are still started, and the fault is
   reported with a notification.
 - **DOC-4 (Agreed)** On dismount: stop dependents gracefully and with enough time.
-  Agreed detail: reverse order, grace period per dependent, default 60 seconds.
+  Agreed detail: reverse order, grace period per dependent, default 10 seconds, as Docker's own `docker stop` (60 until 2026-11-27: two dependents
+  with 60 already exceeded their share of the shutdown time-out). A dependent that needs
+  longer is killed and reported (DOC-5), so its grace period can be raised.
 - **DOC-5 (Agreed, changed 2026-11-15)** If a dependent has not stopped within its
   grace period, it is **killed** and the dismount continues. The kill is logged and
   reported with a notification. Reason: dismounting the volume matters more than a
   clean stop of a dependent, and a dependent must not keep running without its volume.
 - **DOC-6 (Agreed)** A dependent started by hand while its volume is locked is stopped
   again, with a notification.
-- **DOC-7 (Agreed)** Conflict check: warn if a dependent has Unraid autostart enabled or
+- **DOC-7 (Agreed, built 2026-11-27)** Conflict check: warn if a dependent has Unraid autostart enabled or
   a Docker restart policy (`always`, `unless-stopped`) that would start it before the
   volume is mounted.
+  Built: `vcmount options` reads Unraid's autostart list (`/var/lib/docker/unraid-autostart`)
+  and each container's restart policy; the edit panel marks such a dependent on its row
+  ("autostart on", "restart policy"), explains below the list and shows the mark on the
+  closed section too. DOC-6 (stopping one started by hand) is not built yet: it needs a
+  watcher of Docker's events.
 - **DOC-8 (Agreed)** Both Unraid-template containers and Compose stacks are supported.
   Version 1 starts and stops existing containers; full `up`/`down` integration with
   Compose Manager can follow.
@@ -894,3 +901,4 @@ throwaway containers from `alpine:3.21`, run with `scripts/enginetest.sh`).**
 | 2026-11-15 | Docker control starts with single containers; Compose stacks follow as a later step. |
 | 2026-11-16 | SMB sharing design agreed (one file per share, include line in `smb-unassigned.conf`). Web interface design agreed (`docs/DESIGN-ui.md`), with U1 to U4. |
 | 2026-11-16 | Step 3 of the web interface: shares only with Unraid's "Private" security, per user (SHR-1); dependents reordered by drag and drop as on Unraid's Docker page; a mounted volume cannot be renamed or removed (D3); saving checks the revision so a change in another tab is not overwritten. PRIV-3 extended: ready-to-copy File Activity exclusions. |
+| 2026-11-27 | Default grace period of a new dependent lowered from 60 to 10 seconds, as Docker's own `docker stop`; a dependent that needs longer is killed and reported, so it can be raised. DOC-7 built; DOC-6 later. |

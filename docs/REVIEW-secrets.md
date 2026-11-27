@@ -886,4 +886,18 @@ C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be docum
     working on, and the hooks end it for good 15 seconds later; the lock file is not
     inherited by programs the engine starts. LIFE-3: the edit panel warns when a
     volume's dependents need more time than half the shutdown time-out.
+- **Fixed in the third batch (2026-11-27, tested by the owner on Bob):**
+  - B9: the edit panel reads users and containers afresh each time it opens.
+  - B10: answers to an older click on Edit, Info or Mount (over HTTP) are dropped; "Let
+    the share write" ignores a second click while the first runs; the confirmations
+    for a forced dismount, fixing permissions and the top folder show a loader and
+    take one click only.
+  - B11: DOC-7 built (see SPEC). DOC-6 is still open; LIFE-3 was built with S2.
+  - B12: a dependent counts as killed only if Docker reports exit code 137, with the
+    time as fallback when the code cannot be read; a forced dismount reports a
+    container as stopped only when `docker stop` succeeded. The page no longer shows a
+    popup for dependents that stopped cleanly, and "Dismount all" now shows killed or
+    failed dependents.
+  - Development: `scripts/deployweb.sh install` no longer brings the test list (that is
+    `install-test`) and puts Unraid's favourite marks back after copying the pages.
 

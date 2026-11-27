@@ -46,7 +46,7 @@ const CONTAINER_PATTERN = '/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\z/';
 const NOTIFY_SCRIPT = '/usr/local/emhttp/webGui/scripts/notify';
 
 // Seconds a dependent gets to stop by itself before Docker kills it (DOC-4).
-const DEFAULT_GRACE = 60;
+const DEFAULT_GRACE = 10;    // as Docker's own docker stop
 
 // Seconds a program or container gets to end by itself in a forced dismount.
 const FORCE_WAIT = 10;
@@ -288,7 +288,7 @@ function check_keyfiles(array $keyfiles, string $volume_file): array
  * Check the "dependents" list of one saved volume. The order of the list is
  * the order in which the containers are started. Each entry:
  *   container: the name of the Docker container
- *   grace:     seconds it gets to stop by itself, default 60
+ *   grace:     seconds it gets to stop by itself, default 10
  *   delay:     seconds to wait after starting it, default 0
  */
 function read_dependents(string $volume, $list): array
@@ -796,6 +796,49 @@ function container_running(string $container): ?bool
     return $r['code'] !== 0 ? null : trim($r['out']) === 'true';
 }
 
+/** The exit code of a stopped container, or null if it cannot be read. */
+function container_exit_code(string $container): ?int
+{
+    $r = run(
+        [program('docker'), 'inspect', '--type', 'container', '--format', '{{.State.ExitCode}}', $container],
+        TOOL_TIMEOUT
+    );
+    $out = trim($r['out']);
+    return $r['code'] === 0 && preg_match('/\A-?[0-9]{1,4}\z/', $out) ? (int) $out : null;
+}
+
+/** Unraid's list of containers to start with Docker: one name per line, optionally a wait. */
+const AUTOSTART_FILE = '/var/lib/docker/unraid-autostart';
+
+/**
+ * DOC-7: which of these containers start by themselves, through Unraid's
+ * autostart or a Docker restart policy. A dependent among them can start
+ * before its volume is mounted and then writes into an empty folder in RAM.
+ * Returns name => ['autostart' => bool, 'restart' => the policy or ''].
+ */
+function starts_alone(array $containers): array
+{
+    $found = [];
+    if ($containers === []) {
+        return $found;
+    }
+    foreach (@file(AUTOSTART_FILE, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+        $name = preg_split('/\s+/', trim($line))[0];
+        if (in_array($name, $containers, true)) {
+            $found[$name] = ['autostart' => true, 'restart' => ''];
+        }
+    }
+    // Names cannot start with a dash (CONTAINER_PATTERN), so none is read as an option.
+    $r = run(array_merge([program('docker'), 'inspect', '--type', 'container', '--format',
+                          '{{.Name}} {{.HostConfig.RestartPolicy.Name}}'], $containers), TOOL_TIMEOUT);
+    foreach (preg_split('/\n/', trim($r['out'])) as $line) {
+        if (preg_match('#\A/(\S+) (always|unless-stopped)\z#', trim($line), $m) && in_array($m[1], $containers, true)) {
+            $found[$m[1]] = ['autostart' => $found[$m[1]]['autostart'] ?? false, 'restart' => $m[2]];
+        }
+    }
+    return $found;
+}
+
 /**
  * Start the dependents of a volume in list order (DOC-3). One that fails does
  * not hold back the others. Returns the failures, each with its reason.
@@ -902,11 +945,16 @@ function stop_dependents(string $volume, array $dependents): array
         run([program('docker'), 'stop', '-t', (string) $grace, $container], $grace + 30);
         $took = microtime(true) - $begin;
 
+        // Killed only if Docker had to end it: exit code 137 is SIGKILL. The
+        // time alone misleads: a clean stop just inside the grace period plus
+        // Docker's own overhead also reaches it (audit B12). If the code
+        // cannot be read, fall back to the time.
+        $exit = container_exit_code($container);
         if (container_running($container)) {
             $result = 'failed';
             $message = "Dependent \"$container\" could not be stopped.";
             log_event("dependent \"$container\" of \"$volume\" could not be stopped", true);
-        } elseif ($took >= $grace) {
+        } elseif ($exit === null ? $took >= $grace : $exit === 137) {
             $result = 'killed';
             $message = "Dependent \"$container\" did not stop within $grace seconds and was killed.";
             log_event("dependent \"$container\" of \"$volume\" did not stop within $grace seconds and was killed", true);
@@ -1886,14 +1934,29 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
     if (!$locked && $device_number !== '') {
         $users = mount_users($device_number);
         if ($force && $users['containers'] !== []) {
-            foreach (array_keys($users['containers']) as $id) {
+            $stopped = [];
+            $failed = [];
+            foreach ($users['containers'] as $id => $container) {
                 $wait = fitting(FORCE_WAIT, 5);
-                run([program('docker'), 'stop', '-t', (string) $wait, (string) $id], $wait + 30);
+                $r = run([program('docker'), 'stop', '-t', (string) $wait, (string) $id], $wait + 30);
+                // Report only what Docker confirms (audit B12).
+                if ($r['code'] === 0) {
+                    $stopped[] = "\"$container\"";
+                } else {
+                    $failed[] = "\"$container\"";
+                }
             }
-            $stopped = implode(', ', array_map(fn($c) => "\"$c\"", $users['containers']));
-            $notes[] = "Forced: stopped $stopped.";
-            if ($saved) {
-                log_event("dismount of \"$name\" forced: stopped $stopped", true);
+            if ($stopped !== []) {
+                $notes[] = 'Forced: stopped ' . implode(', ', $stopped) . '.';
+                if ($saved) {
+                    log_event("dismount of \"$name\" forced: stopped " . implode(', ', $stopped), true);
+                }
+            }
+            if ($failed !== []) {
+                $notes[] = 'Could not stop ' . implode(', ', $failed) . '.';
+                if ($saved) {
+                    log_event("dismount of \"$name\" forced: could not stop " . implode(', ', $failed), true);
+                }
             }
             $locked = lock_again($mapper);
             if (!$locked) {
@@ -2204,6 +2267,7 @@ function command_options(array $args, bool $json): int
     sort($users);
 
     $containers = [];
+    $alone = [];
     $notes = [];
     if (docker_ready()) {
         $r = run([program('docker'), 'ps', '-a', '--format', '{{.Names}}'], TOOL_TIMEOUT);
@@ -2213,18 +2277,22 @@ function command_options(array $args, bool $json): int
             }
         }
         sort($containers);
+        $alone = starts_alone($containers);
     } else {
         $notes[] = 'The Docker service is not running, so no containers can be listed.';
     }
 
     if ($json) {
-        echo json_encode(['ok' => true, 'users' => $users, 'containers' => $containers, 'notes' => $notes,
+        echo json_encode(['ok' => true, 'users' => $users, 'containers' => $containers,
+                          'starts_alone' => (object) $alone, 'notes' => $notes,
                           'shutdown_timeout' => shutdown_timeout()],
             JSON_UNESCAPED_SLASHES), "\n";
         return CODE_OK;
     }
     echo 'Users:      ', $users === [] ? '-' : implode(', ', $users), "\n";
     echo 'Containers: ', $containers === [] ? '-' : implode(', ', $containers), "\n";
+    // Usually many: names only here, the reasons are in --json and on the page.
+    echo 'Start alone: ', $alone === [] ? '-' : implode(', ', array_keys($alone)), "\n";
     foreach ($notes as $note) {
         echo $note, "\n";
     }

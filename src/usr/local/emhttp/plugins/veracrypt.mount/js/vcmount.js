@@ -33,7 +33,10 @@
     var inQueue = false;         // the dialog is part of "Mount all"
 
     var config = null;           // the saved settings as "vcmount config" returns them
-    var options = null;          // users and containers for the forms
+    var options = null;          // users and containers for the forms, read again for each edit (audit B9)
+    // Each click on Edit, Info or Mount (over HTTP) counts up; an answer for an
+    // older click is dropped, so a slow one cannot overwrite a newer (audit B10).
+    var editSeq = 0, infoSeq = 0, dialogSeq = 0;
     var editing = null;          // the volume being edited: its saved name, '' for a new one, null = list shown
     var dirty = false;           // the edit panel has changes that are not saved
     var autoName = '';           // the name last filled in from the file name
@@ -401,7 +404,9 @@
      * in the style of the mount dialog. Built when first needed.
      */
     function showInfo(name) {
+        var seq = ++infoSeq;
         act({ action: 'info', name: name }).then(function (a) {
+            if (seq !== infoSeq) { return; }
             if (!a.ok) { message('No information', esc(a.error || 'The volume could not be read.'), 'error'); return; }
             var v = a.volume;
             var html = '<dl class="vcm-info-list">' +
@@ -458,7 +463,11 @@
             }
             $('#vcm-info-body').off('click').on('click', '.vcm-fix-top', function (e) {
                 e.preventDefault();
-                act({ action: 'fix-top', name: $(this).attr('data-name') }).then(function (f) {
+                var link = $(this);
+                if (link.hasClass('vcm-busy')) { return; }   // a second click while the first runs
+                link.addClass('vcm-busy');
+                act({ action: 'fix-top', name: link.attr('data-name') }).then(function (f) {
+                    link.removeClass('vcm-busy');
                     if (f.ok) { showInfo(name); } else { message('Could not change the top folder', esc(f.error), 'error'); }
                 });
             }).on('click', '.vcm-fix-perms', function (e) {
@@ -469,7 +478,8 @@
                     text: 'Everything inside the volume will belong to nobody:users, with folders writable for all and ' +
                           'files readable and writable for all, as Unraid\'s "New Permissions" tool does. ' +
                           'This can break containers that need their own owners, such as databases. It cannot be undone.',
-                    type: 'warning', html: true, showCancelButton: true, confirmButtonText: 'Fix permissions', closeOnConfirm: false
+                    type: 'warning', html: true, showCancelButton: true, confirmButtonText: 'Fix permissions',
+                    closeOnConfirm: false, showLoaderOnConfirm: true
                 }, function () {
                     act({ action: 'fix-permissions', name: target }).then(function (f) {
                         message(f.ok ? 'Started' : 'Could not start', esc(f.ok ? f.message : f.error), f.ok ? 'success' : 'error');
@@ -540,7 +550,8 @@
         busyWatch++;
         checkingHttp = 0;
         if (overHttp && !checked) {
-            freshHttpsSetting(function () { openDialog(name, true); });
+            var seq = ++dialogSeq;
+            freshHttpsSetting(function () { if (seq === dialogSeq) { openDialog(name, true); } });
             return;
         }
         var blocked = passwordBlocked();
@@ -785,7 +796,7 @@
                   esc(v.display_name) + ' belongs to another user, so the share cannot write to it.<br><br>' +
                   'Set the top folder to owner nobody:users and make it writable? Nothing inside the volume is changed.',
             type: 'info', html: true, showCancelButton: true,
-            confirmButtonText: 'Set it', cancelButtonText: 'Not now', closeOnConfirm: false
+            confirmButtonText: 'Set it', cancelButtonText: 'Not now', closeOnConfirm: false, showLoaderOnConfirm: true
         }, function (yes) {
             if (!yes) { done(); return; }
             act({ action: 'fix-top', name: v.name }).then(function (f) {
@@ -958,8 +969,14 @@
         return '<i class="fa fa-fw fa-circle-o-notch fa-spin vcm-tile-icon vcm-busy" title="Dismounting… ' + DISMOUNT_WAIT + '"></i>';
     }
 
+    /**
+     * The notes worth showing. A dependent that stopped cleanly is what the
+     * confirmation already announced, so it gets no popup; the command line
+     * still lists it.
+     */
+    var CLEAN_STOP = /^Stopped dependent "/;
     function notesOf(a) {
-        return (a.notes || []).map(esc).join('<br>');
+        return (a.notes || []).filter(function (n) { return !CLEAN_STOP.test(n); }).map(esc).join('<br>');
     }
 
     function dismount(name) {
@@ -969,7 +986,7 @@
             setDismounting([name], false);
             refresh();
             if (a.ok) {
-                if ((a.notes || []).length) { message('Dismounted ' + esc(name), notesOf(a), 'info'); }
+                if (notesOf(a)) { message('Dismounted ' + esc(name), notesOf(a), 'info'); }
                 return;
             }
             if (a.code !== 5) {
@@ -987,7 +1004,8 @@
                     title: 'Force the dismount?',
                     text: 'Programs that hold ' + esc(name) + ' open are ended, and containers that use it are stopped. Unsaved work in them is lost.',
                     type: 'warning', html: true,
-                    showCancelButton: true, confirmButtonText: 'Yes, force it', closeOnConfirm: false
+                    showCancelButton: true, confirmButtonText: 'Yes, force it', closeOnConfirm: false,
+                    showLoaderOnConfirm: true
                 }, function () {
                     setDismounting([name], true);
                     act({ action: 'dismount-force', name: name }).then(function (f) {
@@ -1031,7 +1049,8 @@
                 $('#vcm-dismount-all').prop('disabled', false).val('Dismount all');
                 refresh();
                 var lines = (a.results || []).map(function (r) {
-                    return r.ok ? esc(r.message) : esc(r.error) + heldBy(r);
+                    // A killed or failed dependent is reported here too.
+                    return r.ok ? esc(r.message) + (notesOf(r) ? '<br>' + notesOf(r) : '') : esc(r.error) + heldBy(r);
                 });
                 if (!a.results && a.error) { lines.push(esc(a.error)); }
                 message(a.ok ? 'Done' : 'Not everything was dismounted',
@@ -1057,11 +1076,20 @@
 
     function depItem(dep) {
         var known = (options.containers || []).indexOf(dep.container) >= 0;
+        // DOC-7: marked on its row with the reason; #e-deps-alone explains.
+        var alone = options.starts_alone && Object.prototype.hasOwnProperty.call(options.starts_alone, dep.container)
+            ? options.starts_alone[dep.container] : null;
+        var why = alone ? [alone.autostart ? 'autostart on' : '', alone.restart ? 'restart policy' : ''].filter(Boolean) : [];
+        var whyLong = alone ? [alone.autostart ? 'Unraid autostart is on.' : '',
+                               alone.restart ? 'Docker restart policy: ' + alone.restart + '.' : ''].filter(Boolean) : [];
         return $('<li class="vcm-dep">' +
             '<span class="vcm-handle" title="Drag to reorder">&#9776;</span>' +
             '<span class="vcm-dep-name">' + esc(dep.container) + (known ? '' : ' <em>(not found)</em>') + '</span>' +
             '<label>stop within <input type="number" class="e-grace" min="1" max="600" value="' + esc(dep.grace) + '"> s</label>' +
             '<label>then wait <input type="number" class="e-delay" min="0" max="600" value="' + esc(dep.delay) + '"> s</label>' +
+            // Unraid's own warning mark, as on its Docker and Main pages.
+            (why.length ? '<span class="vcm-dep-alone" title="' + esc(whyLong.join(' ')) +
+                     '"><i class="fa fa-warning orange-text"></i> ' + esc(why.join(', ')) + '</span>' : '') +
             '<a href="#" class="vcm-dep-remove" title="Remove">&#10005;</a>' +
             '</li>').attr('data-container', dep.container);
     }
@@ -1138,8 +1166,21 @@
             + 'own short limit. Shorten the grace periods, or raise the time-out.');
     }
 
+    /**
+     * DOC-7: a dependent that Unraid or Docker starts by itself can run before
+     * its volume is mounted. Name each one and why.
+     */
+    function depsAlone() {
+        $('#e-deps-alone').prop('hidden', !$('#e-deps .vcm-dep-alone').length).html(
+            '<i class="fa fa-warning orange-text"></i> Marked dependents start on their own and can run before the volume is mounted. They then write into '
+            + 'memory instead of the volume, and <b>the volume can\'t be mounted there afterwards</b>. On the Docker '
+            + 'tab, switch off autostart and set the restart policy to "no" or "on-failure"; this plugin starts them '
+            + 'after the mount.');
+    }
+
     function updateSummaries() {
         depsTime();
+        depsAlone();
         var share = 'not shared';
         if ($('#e-share').val() === 'yes') {
             var users = $('.e-access').filter(function () { return $(this).val() !== 'none'; }).map(function () {
@@ -1159,6 +1200,10 @@
         $('#s-unlock').text(unlock.join(', ') + ($('#e-hidden').is(':checked') ? ' · hidden volume' : ''));
         var deps = $('#e-deps li').map(function () { return $(this).attr('data-container'); }).get();
         $('#s-deps').text(deps.length ? deps.join(', ') : 'none');
+        // Seen also while the section is closed (DOC-7).
+        if ($('#e-deps .vcm-dep-alone').length) {
+            $('#s-deps').prepend('<i class="fa fa-warning orange-text" title="A dependent starts on its own"></i> ');
+        }
         var name = $.trim($('#e-name').val());
         var point = $('#e-mount-mode').val() === 'share' ? $.trim($('#e-mount-at').val()) : '/mnt/addons/' + name;
         var display = $.trim($('#e-display').val());
@@ -1267,7 +1312,9 @@
 
     /** Load the saved settings and the choices, then show the panel for one volume. */
     function openEdit(name) {
-        $.when(act({ action: 'config' }), options ? options : act({ action: 'options' })).then(function (c, o) {
+        var seq = ++editSeq;
+        $.when(act({ action: 'config' }), act({ action: 'options' })).then(function (c, o) {
+            if (seq !== editSeq) { return; }
             if (!c.ok) {
                 message('Could not read the settings', esc(c.error), 'error');
                 return;
@@ -1501,7 +1548,7 @@
         $('#e-dep-add').on('click', function () {
             var container = $('#e-dep-choice').val();
             if (!container) { return; }
-            $('#e-deps').append(depItem({ container: container, grace: 60, delay: 0 }));
+            $('#e-deps').append(depItem({ container: container, grace: 10, delay: 0 }));
             depChoices();
             markDirty();
             updateSummaries();

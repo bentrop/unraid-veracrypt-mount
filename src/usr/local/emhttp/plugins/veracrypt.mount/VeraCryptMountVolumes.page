@@ -140,6 +140,7 @@ $vcm = '/plugins/veracrypt.mount';
          stopped bottom to top. Drag to reorder.</p>
       <ul id="e-deps" class="vcm-deps"></ul>
       <p class="vcm-warning" id="e-deps-time" hidden></p>
+      <p class="vcm-warning" id="e-deps-alone" hidden></p>
       <!-- In the field column, as the other sections' fields. -->
       <dl class="vcm-form">
         <dt>Add</dt>
