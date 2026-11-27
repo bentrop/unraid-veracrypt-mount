@@ -190,8 +190,15 @@ Nothing needs to be installed on the server.
   grace period, it is **killed** and the dismount continues. The kill is logged and
   reported with a notification. Reason: dismounting the volume matters more than a
   clean stop of a dependent, and a dependent must not keep running without its volume.
-- **DOC-6 (Agreed)** A dependent started by hand while its volume is locked is stopped
+- **DOC-6 (Agreed, built 2026-11-27)** A dependent started by hand while its volume is locked is stopped
   again, with a notification.
+  Built as part of the minute check (`vcmount check`, run by cron with the idle lock): a
+  dependent running while all volumes it belongs to are locked is stopped within about a
+  minute, with its grace period. The folder Docker created for it is removed if it holds
+  no file; otherwise the notification says it may hold data (in RAM under /mnt/addons/)
+  that must be moved or deleted before mounting, and the mount's refusal says the same.
+  Docker is asked for names only, from memory, without the lock and with a 10-second
+  limit; the lock is taken only when something has to be stopped.
 - **DOC-7 (Agreed, built 2026-11-27)** Conflict check: warn if a dependent has Unraid autostart enabled or
   a Docker restart policy (`always`, `unless-stopped`) that would start it before the
   volume is mounted.

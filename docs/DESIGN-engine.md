@@ -53,7 +53,7 @@ and is hard to change later).
 | `vcmount config` | Shows the saved settings as stored, with their revision (a SHA-256 fingerprint of the file, or `none`). Changes nothing. |
 | `vcmount save-config [--revision <r>]` | Reads new settings as JSON on standard input, checks them with the same rules used when reading the file, and replaces the file in one step (Decision U1 in `docs/DESIGN-ui.md`). With `--revision` it refuses (code 3) when the file changed since it was read, so a change made in another browser tab is not overwritten unseen. It always refuses to rename or remove a volume that is mounted (decision D3, 2026-11-16). |
 | `vcmount busy` | Says whether another `vcmount` action is running. The web page uses it after a lost answer. |
-| `vcmount idle-check` | The idle lock (LIFE-8), run once a minute by cron (section 10a). |
+| `vcmount check` | Run once a minute by cron: stops dependents of locked volumes (DOC-6), then the idle lock (LIFE-8); section 10a. `idle-check` is its earlier name. |
 
 `vcmount mount ... --over-http` is what the web page sends when the password came over
 plain HTTP. It is refused (code 3) while the setting `require_https` is on (UI-5).
@@ -298,10 +298,19 @@ as the same file. If Samba is running but cannot be asked, the mount is refused 
 - **No header changes.** The engine only ever calls `cryptsetup` to open, close and show
   status (SEC-7).
 
-## 10a. Idle lock (LIFE-8, added 2026-11-27)
+## 10a. Minute check: idle lock (LIFE-8) and dependents of locked volumes (DOC-6), added 2026-11-27
+
+First the dependents: a container listed as a dependent of a saved volume runs, and every
+volume it belongs to is locked. `docker ps` names only (Docker answers from memory, no
+disk is read), without the lock and with a 10-second limit, so a hanging Docker service
+never holds up a mount. Only if something has to be stopped is the lock taken and the
+state looked at again; then the container gets `docker stop` with its grace period and a
+notification. The folder Docker made for it is removed when it holds nothing but empty
+folders (only under `/mnt/addons/`); otherwise the notification asks to move or delete
+what is there. Then the idle lock:
 
 A saved volume may carry `"idle_lock": <minutes>` (5 to 1440); without it the volume is
-never locked for being idle. Unraid's cron runs `vcmount idle-check` once a minute (the
+never locked for being idle. Unraid's cron runs `vcmount check` once a minute (the
 plugin installs `/boot/config/plugins/veracrypt.mount/veracrypt.mount.cron` and runs
 `update_cron`; removal takes it away again). Each run:
 
