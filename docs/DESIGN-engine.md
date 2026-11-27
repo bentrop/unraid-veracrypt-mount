@@ -47,7 +47,7 @@ and is hard to change later).
 | `vcmount stop-dependents --all` | Stops the dependents of every mounted volume; the volumes stay mounted. Used by the `stopping_docker` hook. |
 | `--within <seconds>` (with `stop-dependents --all` and `dismount --all`) | The hooks pass the time they have. The engine shortens grace periods and the wait before ending programs to fit, and leaves what no longer fits (a dependent running, a volume mounted) to Unraid, with a log line. A stop signal (SIGTERM, SIGINT, SIGHUP) only asks: the volume being worked on is finished first. The hooks run the engine under `timeout -k 15`, and on "busy" send `cancel-unlock` once before trying again. The lock file is opened with close-on-exec, so a helper left running cannot keep it (audit S2). |
 | `vcmount start-dependents --all` | Starts the dependents of every mounted volume in list order. Used by the `docker_started` hook after Docker was switched off and on (LIFE-4). |
-| `vcmount cancel-unlock [--unlock-id <id> \| --array-stop]` | Writes the marker `/var/run/vcmount/cancel` (with `--array-stop` also `/var/run/vcmount/stop`, see section 9a) and nothing else; takes no lock. The marker holds the ID of the one unlock it is for: the page sends the ID it gave its own mount (16 to 64 hex characters, `--unlock-id`); without one (SSH, the array-stop hooks) the engine takes the ID of the running unlock from `/var/run/vcmount/unlocking`, and does nothing if none runs. A mount waiting for `cryptsetup` looks every half second and ends its own child only for its own ID (UI-8, review C3); a cancel written just before its mount took the lock is honoured, any other is removed. SIGINT, SIGTERM and SIGHUP end `cryptsetup` the same way. During the rest of a mount they are only noted (review C5): before the file system is mounted the volume is locked again and the mount ends as cancelled; after that, mount, share and dependents are finished (without the waits between dependents) and the engine then ends. `vcmount busy --json` adds `unlocking_for` (seconds since a running check started, or null) and `unlock_id`. |
+| `vcmount cancel-unlock [--unlock-id <id> \| --array-stop]` | Writes the marker `/run/vcmount/cancel` (with `--array-stop` also `/run/vcmount/stop`, see section 9a) and nothing else; takes no lock. The marker holds the ID of the one unlock it is for: the page sends the ID it gave its own mount (16 to 64 hex characters, `--unlock-id`); without one (SSH, the array-stop hooks) the engine takes the ID of the running unlock from `/run/vcmount/unlocking`, and does nothing if none runs. A mount waiting for `cryptsetup` looks every half second and ends its own child only for its own ID (UI-8, review C3); a cancel written just before its mount took the lock is honoured, any other is removed. SIGINT, SIGTERM and SIGHUP end `cryptsetup` the same way. During the rest of a mount they are only noted (review C5): before the file system is mounted the volume is locked again and the mount ends as cancelled; after that, mount, share and dependents are finished (without the waits between dependents) and the engine then ends. `vcmount busy --json` adds `unlocking_for` (seconds since a running check started, or null) and `unlock_id`. |
 | `vcmount repair-shares` | Makes the SMB shares match the mounted volumes: adds missing ones, removes left-over ones (section 9b). |
 | `vcmount options` | Lists the Unraid users and the Docker containers, for the web forms. Changes nothing. |
 | `vcmount config` | Shows the saved settings as stored, with their revision (a SHA-256 fingerprint of the file, or `none`). Changes nothing. |
@@ -231,7 +231,7 @@ has failed:
 quarter. With `--array-stop` the dismount is forced unless the configuration file says
 `"settings": {"force_at_array_stop": false}`. When a hook finds another action
 running (code 6), it calls `vcmount cancel-unlock --array-stop` on every retry: that
-cancels a running unlock and writes the time to `/var/run/vcmount/stop`. The minute
+cancels a running unlock and writes the time to `/run/vcmount/stop`. The minute
 check and the dependents' start delays look at it every second and give way, so they
 cannot hold the lock through an array stop (audit 2026-11-27c S1).
 A forced `dismount --all` works in two rounds (S1.4): first every volume without
@@ -352,10 +352,10 @@ plugin installs `/boot/config/plugins/veracrypt.mount/veracrypt.mount.cron` and 
    unmount, lock), never forced, and sends a normal notification. If that fails, the
    dismount's own message is logged and the next try waits a full idle time.
 
-Runtime files live in `/var/run/vcmount/` (mode 0700, checked to be a real folder owned by root, not a link, before every use; audit S12):
+Runtime files live in `/run/vcmount/` (mode 0700, checked to be a real folder owned by root, not a link, before every use; audit S12):
 `lock`, `cancel`, `unlocking`, `idle`, `idle-error`, `stray`, `stop`.
 
-The state (device, counts, since when, notified) is kept in `/var/run/vcmount/idle`,
+The state (device, counts, since when, notified) is kept in `/run/vcmount/idle`,
 in RAM, written and read like the other marker files (never through a link). `list
 --json` adds per volume `idle_lock`, `locks_in` (whole minutes left as the last check
 saw it, null if not watched yet) and `idle_blocked`; whole minutes, so the pages, which
@@ -363,7 +363,7 @@ draw again only on a change, are not redrawn every few seconds.
 
 Cron sends the check's output nowhere, so a failure would go unnoticed and volumes
 would quietly stay mounted. The first failure is logged and sent as an alert, later
-ones are not while `/var/run/vcmount/idle-error` exists, and the first run that works
+ones are not while `/run/vcmount/idle-error` exists, and the first run that works
 again says so and removes it. "Busy" is not a failure. A syntax error in the engine
 itself cannot be reported this way; the release workflow refuses those (`php -l`),
 as `scripts/deployweb.sh` does for the fast loop.

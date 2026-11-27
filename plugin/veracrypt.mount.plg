@@ -23,22 +23,11 @@ removepkg, so every file it brings is also taken away again.
 <CHANGES>
 ##VeraCrypt Mount
 
-###&version;
-- TrueCrypt volumes open too (tested with cryptsetup's sample volumes); a clear message for very old ones (before TrueCrypt 5.0) that Linux cannot open.
-- Safer internals from the final audit: runtime files in a root-only folder, Cancel stops only its own unlock, a stop signal never leaves a half-mounted volume, one set of input checks, a clear message when an XFS volume has the same ID as a disk.
-- The dialogs work fully with the keyboard and screen readers.
-
-###2026.11.27p
-- An XFS copy of a mounted volume is refused with a clear message; fixes from the second security audit.
-
-###2026.11.27o
-- Containers tied to a volume are stopped if they run while it is locked.
-
-###2026.11.27l
-- Lock when idle: a volume is dismounted after a chosen time without activity.
-
-###Earlier
-- Mount, share and dismount VeraCrypt volumes; dependent containers; Dashboard tile and Main page section; safe dismount at array stop and shutdown. The full history is on GitHub.
+###2026.11.27v
+- First public release (beta). Mount VeraCrypt and TrueCrypt volumes with the cryptsetup Unraid already has: password, PIM, keyfiles, hidden volumes; FAT, exFAT, NTFS, ext4, XFS and Btrfs inside.
+- Per-user SMB shares, dependent containers that start and stop with their volume, lock when idle, Dashboard tile and Main page section, the vcmount command for SSH.
+- Safe dismount at array stop and shutdown; a normal dismount never takes a volume from a program or a computer that still uses it.
+- The password reaches cryptsetup through standard input only and is never stored or logged. Reviewed in several independent audits (see docs/ on GitHub).
 </CHANGES>
 
 <FILE Run="/bin/bash">
@@ -101,7 +90,7 @@ done
 # just replaced; put it back from /boot/config/favorites.cfg (only read), as
 # Unraid does at boot.
 [ -x /usr/local/emhttp/plugins/dynamix/scripts/restore_favorites ] &amp;&amp; /usr/local/emhttp/plugins/dynamix/scripts/restore_favorites
-# Status files of older versions, now in /var/run/vcmount/ (audit S12).
+# Status files of older versions, now in /run/vcmount/ (audit S12).
 rm -f /var/run/vcmount.lock /var/run/vcmount.cancel /var/run/vcmount.unlocking /var/run/vcmount.idle /var/run/vcmount.idle-error /var/run/vcmount.stray
 echo ""
 echo "-----------------------------------------------------------"
@@ -137,8 +126,8 @@ rm -f &flash;/&name;.cron
 removepkg &name;
 rmdir /etc/samba/veracrypt-shares 2&gt;/dev/null
 rm -f &flash;/&name;-*.txz
-if [ -d /var/run/vcmount ] &amp;&amp; [ ! -L /var/run/vcmount ]; then
-  rm -rf /var/run/vcmount
+if [ -d /run/vcmount ] &amp;&amp; [ ! -L /run/vcmount ]; then
+  rm -rf /run/vcmount
 fi
 rm -f /var/run/vcmount.lock /var/run/vcmount.cancel /var/run/vcmount.unlocking /var/run/vcmount.idle /var/run/vcmount.idle-error /var/run/vcmount.stray
 echo ""

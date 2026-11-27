@@ -76,7 +76,7 @@ const MAX_CONFIG_SIZE = 1048576;
 
 // Runtime files live in one root-only folder in RAM (mode 0700), verified not
 // to be a link and owned by root before use (audit S12, review C4).
-const RUN_DIR = '/var/run/vcmount';
+const RUN_DIR = '/run/vcmount';   // /var/run is a link to /run on Unraid; the same folder
 // Held while an action that changes something runs.
 const LOCK_FILE = RUN_DIR . '/lock';
 // Created by "vcmount cancel-unlock"; holds the token of the one unlock it is
@@ -3076,7 +3076,7 @@ function run_dir_safe(): bool
 }
 
 /**
- * Make sure the runtime folder (/var/run/vcmount) exists with mode 0700, is a
+ * Make sure the runtime folder (/run/vcmount) exists with mode 0700, is a
  * real folder (not a link) and belongs to root (audit S12).
  */
 function ensure_run_dir(): void

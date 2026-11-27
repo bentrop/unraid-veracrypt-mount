@@ -31,14 +31,16 @@ PASSWORD_HIDDEN=$(password_of PASSWORD_HIDDEN)
 [ -n "$PASSWORD" ] && [ -n "$PASSWORD_HIDDEN" ] || { echo "No passwords found in $compat"; exit 1; }
 
 export MSYS_NO_PATHCONV=1
-files=$("$SSH" -n -o BatchMode=yes "$HOST" "cd $SAMPLES && ls tc_* tck_*" 2>/dev/null | tr -d '\r')
+# Quote a value for the server's shell (spaces, quotes), never as raw text.
+q() { printf '%q' "$1"; }
+files=$("$SSH" -n -o BatchMode=yes "$HOST" "cd $(q "$SAMPLES") && ls tc_* tck_*" 2>/dev/null | tr -d '\r')
 
 ok=0; old=0; bad=0
 for f in $files; do
-    args="mount --file $SAMPLES/$f --name tctest --json"
+    args="mount --file $(q "$SAMPLES/$f") --name tctest --json"
     pw=$PASSWORD
     case "$f" in *-hidden) args="$args --hidden"; pw=$PASSWORD_HIDDEN ;; esac
-    case "$f" in tck_*) args="$args --keyfile $SAMPLES/keyfile1 --keyfile $SAMPLES/keyfile2" ;; esac
+    case "$f" in tck_*) args="$args --keyfile $(q "$SAMPLES/keyfile1") --keyfile $(q "$SAMPLES/keyfile2")" ;; esac
     start=$(date +%s)
     out=$(printf '%s\n' "$pw" | "$SSH" -o BatchMode=yes "$HOST" "$ENGINE $args" 2>/dev/null | tr -d '\r')
     secs=$(( $(date +%s) - start ))

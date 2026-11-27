@@ -300,7 +300,7 @@ Nothing needs to be installed on the server.
   A PIM above 2,000 (over four times VeraCrypt's default effort) is sent only after a
   warning and a second click; the warning does not show the PIM.
 - **UI-8 (Agreed, 2026-11-26)** Cancel ends a running unlock. The page only asks:
-  `vcmount cancel-unlock` creates the marker `/var/run/vcmount/cancel`, holding the
+  `vcmount cancel-unlock` creates the marker `/run/vcmount/cancel`, holding the
   random ID of the one unlock it is for (review C3). The mount, which waits for
   `cryptsetup` anyway, looks for it every half second and ends its own child; no
   process number is passed around, so it cannot hit another program. A cancel for
@@ -309,7 +309,7 @@ Nothing needs to be installed on the server.
   accepted changes nothing: the mount completes. Ctrl+C, a closed terminal and a stop
   signal (also the page's own time limit) are caught during the password check and end
   cryptsetup the same way; otherwise it would run on alone, since it ignores them until
-  its key derivation ends. While the check runs, `/var/run/vcmount/unlocking` holds its
+  its key derivation ends. While the check runs, `/run/vcmount/unlocking` holds its
   start time and its random ID (no name, no path). A mount that finds the engine busy says at once what
   is running and, for another unlock, offers to stop it, instead of waiting with its
   own timer. Needs a short separate review (SEC-9).
@@ -937,6 +937,7 @@ throwaway containers from `alpine:3.21`, run with `scripts/enginetest.sh`).**
 | 2026-11-16 | SMB sharing design agreed (one file per share, include line in `smb-unassigned.conf`). Web interface design agreed (`docs/DESIGN-ui.md`), with U1 to U4. |
 | 2026-11-16 | Step 3 of the web interface: shares only with Unraid's "Private" security, per user (SHR-1); dependents reordered by drag and drop as on Unraid's Docker page; a mounted volume cannot be renamed or removed (D3); saving checks the revision so a change in another tab is not overwritten. PRIV-3 extended: ready-to-copy File Activity exclusions. |
 | 2026-11-27 | Full pre-release audit (docs/AUDIT-2026-11-27c.md) fixed in two batches. LIFE-6 changed: removal refuses while anything is mounted and changes nothing; updates stay allowed. LIFE-5 changed: one force dialog; a file open over the network blocks a normal dismount; a busy normal dismount restores share and dependents. Array stop: hooks leave a stop request that the minute check and dependents' start delays give way to. |
+| 2026-11-27 | Runtime folder spelled `/run/vcmount` instead of `/var/run/vcmount` (the same folder on Unraid), before going public. Every release needs a changelog entry: `build.py` refuses a version without `###<version>` in the `.plg`. |
 | 2026-11-27 | Array stop with several volumes in use (audit 2026-11-27c S1.4): the forced dismount of all volumes ends what holds them together, in one shared wait, instead of one volume after the other. |
 | 2026-11-27 | TrueCrypt volumes supported without a setting of their own (TC-1): the unlock already tries both formats. No TrueCrypt-only password limit (64 bytes) or PIM check: a TrueCrypt volume cannot have a longer password or a PIM, so a wrong entry is simply a wrong password. Documented as tested with sample volumes only. |
 | 2026-11-27 | Default grace period of a new dependent lowered from 60 to 10 seconds, as Docker's own `docker stop`; a dependent that needs longer is killed and reported, so it can be raised. DOC-7 built; DOC-6 later. |

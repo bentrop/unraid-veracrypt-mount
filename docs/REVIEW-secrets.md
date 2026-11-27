@@ -1049,6 +1049,9 @@ containers.
   with Cancel focused.
 - **S1.4 (fixed afterwards):** a forced dismount of all volumes works in two rounds,
   so several busy volumes share one wait (DESIGN-engine section 9a); tested with three.
+- **Afterwards:** the runtime folder is now spelled `/run/vcmount` (on Unraid `/var/run`
+  is a link to `/run`, so it is the same folder, same checks); the XFS duplicate check
+  reads only the last two minutes of kernel warnings.
 - **Not fixed:** a few cosmetic items noted in the audit as harmless.
 - **Not tested on Bob:** keyfile-only volume with a PIM (no such test volume);
   container mount propagation for volumes inside a share (S3.2 is a warning only);

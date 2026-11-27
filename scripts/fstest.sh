@@ -24,12 +24,14 @@ FILE="${2:-}"
 POINT="/mnt/addons/$NAME"
 TEST="$POINT/vcm-fstest.txt"
 
+# Quote a value for the server's shell (spaces, quotes), never as raw text.
+q() { printf '%q' "$1"; }
 on_bob() { "$SSH" -n -o BatchMode=yes "$HOST" "$1" 2>&1 | grep -v 'IO is still pending'; }
 mount_it() {   # $1: extra options ("" or "--read-only")
     if [ -n "$FILE" ]; then
-        "$SSH" -o BatchMode=yes "$HOST" "vcmount mount --file '$FILE' --name '$NAME' $1" < "$PASSWORD" 2>&1 | grep -v 'IO is still pending'
+        "$SSH" -o BatchMode=yes "$HOST" "vcmount mount --file $(q "$FILE") --name $(q "$NAME") $1" < "$PASSWORD" 2>&1 | grep -v 'IO is still pending'
     else
-        "$SSH" -o BatchMode=yes "$HOST" "vcmount mount '$NAME' $1" < "$PASSWORD" 2>&1 | grep -v 'IO is still pending'
+        "$SSH" -o BatchMode=yes "$HOST" "vcmount mount $(q "$NAME") $1" < "$PASSWORD" 2>&1 | grep -v 'IO is still pending'
     fi
 }
 

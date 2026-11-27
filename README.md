@@ -183,7 +183,11 @@ you find a problem, please report it privately ([`SECURITY.md`](SECURITY.md)).
 - **Helper scripts** in `scripts/` copy files to a test server and run tests there.
   They read the server's address from `.secrets/server` and a test user from
   `.secrets/test-user` (one line each; `.secrets/` is never committed). Test only
-  with throwaway volumes.
+  with throwaway volumes. Among them: `deployweb.sh` (copy the pages and the engine;
+  `install-demo` switches to the demo volumes of `tests/volumes.demo.json` for
+  screenshots), `enginetest.sh` and `actiontest.sh` (one test case each),
+  `tctest.sh` (cryptsetup's TrueCrypt sample volumes) and `forcealltest.sh` (array
+  stop with several volumes in use; `VCMOUNT_TRACE=1` shows the engine's timing).
 
 ## Licence
 

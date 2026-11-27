@@ -122,6 +122,12 @@ def main():
         version = datetime.date.today().strftime('%Y.%m.%d')
     if not re.fullmatch(r'\d{4}\.\d{2}\.\d{2}[a-z]?', version):
         fail(f'"{version}" is not a version like 2026.11.16 or 2026.11.16a.')
+    # Every release says what changed, in the .plg that Unraid shows on update:
+    # no build without a "###<version>" entry in <CHANGES>.
+    changes = re.search(r'<CHANGES>(.*?)</CHANGES>', plg_now, re.S)
+    if not changes or not re.search(rf'^###{re.escape(version)}\s*$', changes.group(1), re.M):
+        fail(f'the .plg has no changelog entry for {version}. Add "###{version}" with a line or two '
+             'for users at the top of <CHANGES> in plugin/veracrypt.mount.plg.')
     global MTIME
     day = datetime.datetime.strptime(version[:10], '%Y.%m.%d').replace(tzinfo=datetime.timezone.utc)
     MTIME = int(day.timestamp())

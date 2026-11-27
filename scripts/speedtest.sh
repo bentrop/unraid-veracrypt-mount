@@ -29,11 +29,13 @@ NAME=tw-speed
 POINT="/mnt/addons/$NAME"
 TEST="$POINT/vcm-speedtest.bin"
 
+# Quote a value for the server's shell (spaces, quotes), never as raw text.
+q() { printf '%q' "$1"; }
 on_bob() { "$SSH" -n -o BatchMode=yes "$HOST" "$1" 2>&1 | grep -v 'IO is still pending'; }
 
 for path in "$SHARE_PATH" "$DISK_PATH"; do
     echo "== $path"
-    "$SSH" -o BatchMode=yes "$HOST" "vcmount mount --file '$path' --name '$NAME'" < "$PASSWORD" 2>&1 | grep -v 'IO is still pending'
+    "$SSH" -o BatchMode=yes "$HOST" "vcmount mount --file $(q "$path") --name $(q "$NAME")" < "$PASSWORD" 2>&1 | grep -v 'IO is still pending'
     # The answer comes back as text: an exit code would be lost in the ssh pipe.
     if [ "$(on_bob "grep -q ' $POINT ' /proc/mounts && echo yes || echo no")" != yes ]; then
         echo "not mounted, test stopped" >&2
