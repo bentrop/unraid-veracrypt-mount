@@ -72,8 +72,8 @@ $vcm = '/plugins/veracrypt.mount';
 
 <!-- Add / edit a volume (screen s-edit). Only name and file are always
      visible; the boxes below are folded and show their setting on the right.
-     Features that are not built yet (automount, lock when idle, Compose
-     stacks) are left out until they exist. -->
+     Features that are not built yet (automount, Compose stacks) are left out
+     until they exist. -->
 <div id="vcm-edit" hidden>
   <!-- Used only when Unraid shows no title bar above the page (tabs). -->
   <nav class="vcm-crumb" id="vcm-crumb" hidden></nav>
@@ -100,7 +100,7 @@ $vcm = '/plugins/veracrypt.mount';
             changed, here or over the network.</span></label>
           <label class="vcm-check"><input type="checkbox" id="e-idle"> <span>Lock when idle</span></label>
           <div id="e-idle-box" class="vcm-sub" hidden>
-            <label>after <input type="number" id="e-idle-min" min="5" max="1440" value="15"> minutes without reads
+            <label>after <input type="number" id="e-idle-min" min="5" max="1440" step="1" value="15"> minutes without reads
               or writes</label>
             <span class="vcm-note">Checked once a minute. Its dependents are stopped first; nothing is
               forced, so a volume with a file still open stays mounted.</span>

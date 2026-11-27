@@ -88,6 +88,10 @@ const IDLE_MIN = 5;            // minutes, the shortest idle lock time
 const IDLE_MAX = 1440;         // minutes, one day
 // Exists while the idle check fails, so the failure is reported once only.
 const IDLE_ERROR_FILE = '/var/run/vcmount.idle-error';
+// DOC-6: dependents that could not be stopped, with when that failed, so an
+// unstoppable container does not retry and flood notifications every minute.
+const STRAY_FAILED_FILE = '/var/run/vcmount.stray';
+const STRAY_BACKOFF = 3600;    // seconds before retrying a dependent that failed to stop
 
 // Time limits in seconds, so the engine can never hang forever.
 const UNLOCK_TIMEOUT = 180;    // cryptsetup checking a password (slow on purpose)
@@ -459,6 +463,7 @@ function live_volumes(): array
         $dm = dm_name($device);
         $mount = $dm === null ? null : ($mounts[$dm] ?? null);
         $live[$name] = [
+            'dm' => $dm,
             'file' => $dm === null ? null : backing_file($dm),
             'mounted_at' => $mount['point'] ?? null,
             'filesystem' => $mount['filesystem'] ?? null,
@@ -508,7 +513,7 @@ function describe(string $name, ?array $saved, ?array $live): array
         // it although its time is up. Minutes, so the list changes only once
         // a minute and the pages are not drawn again every few seconds.
         'idle_lock' => $saved['idle_lock'] ?? null,
-    ] + idle_view($name, $state === 'mounted' ? ($saved['idle_lock'] ?? null) : null);
+    ] + idle_view($name, $state === 'mounted' ? ($saved['idle_lock'] ?? null) : null, $live['dm'] ?? null);
 }
 
 /** All volumes: the saved ones first, then anything mounted without saving. */
@@ -1592,6 +1597,17 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
             @rmdir($point);
         }
         $locked = lock_again($mapper);
+        // Duplicate UUID against a non-plugin XFS filesystem (e.g. an array
+        // disk): never advise xfs_repair (audit B6).
+        if ($found === 'xfs' && preg_match('/duplicate|file exists/i', $r['err'])) {
+            throw new Fail(
+                "Refused: its XFS file system has the same ID (UUID) as another mounted XFS file system on this server.\n"
+                . trim($r['err']) . "\n"
+                . 'XFS cannot mount two file systems with the same ID at once. '
+                . ($locked ? 'The volume was locked again.' : 'The volume could NOT be locked again.'),
+                CODE_REFUSED
+            );
+        }
         throw new Fail(
             "The volume was unlocked, but its filesystem could not be mounted.\n"
             . trim($r['err']) . "\n"
@@ -1608,6 +1624,7 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
             CODE_FILESYSTEM
         );
     }
+    clear_idle_entry($name);
 }
 
 /** The ID (UUID) of the file system on a device, read from the device itself. */
@@ -1816,6 +1833,13 @@ function below(string $path, string $point): bool
     return $path === $point || strncmp($path, "$point/", strlen($point) + 1) === 0;
 }
 
+/** Docker container ID of a process from its cgroup, or null if not in a container. */
+function process_container_id(string $proc_dir): ?string
+{
+    return preg_match('#docker[-/]([0-9a-f]{64})#', (string) @file_get_contents("$proc_dir/cgroup"), $m)
+        ? $m[1] : null;
+}
+
 /**
  * Who still has this device mounted? Asked after the volume was dismounted on
  * the server itself: what is left then are containers that were given a
@@ -1845,8 +1869,9 @@ function mount_users(string $device_number): array
         }
         // A program inside a container carries the container's ID in its cgroup,
         // after "docker-" or "docker/" (audit S5: not just any long hex string).
-        if (preg_match('#docker[-/]([0-9a-f]{64})#', (string) @file_get_contents("$dir/cgroup"), $m)) {
-            $ids[$m[1]] = true;
+        $id = process_container_id($dir);
+        if ($id !== null) {
+            $ids[$id] = true;
         } else {
             $programs[] = program_label($dir);
         }
@@ -2071,6 +2096,7 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
     if ($saved) {
         log_event("dismounted \"$name\"");
     }
+    clear_idle_entry($name);
     return $notes;
 }
 
@@ -2541,19 +2567,27 @@ function command_privacy(array $args, bool $json): int
 }
 
 /**
- * Write one of the marker files in /var/run. Whatever has that name is removed
- * first and the file is created new ('x' fails if anything is there again), so
- * a planted link can never send the write elsewhere (review C4).
+ * Write one of the marker files in /var/run atomically with mode 0600. A fresh
+ * temp file ('x' fails if anything exists there) is restricted to root, written,
+ * and renamed into place — rename replaces any symlink at $path without
+ * following it, and concurrent readers never see a half-written file (review C4,
+ * audit 2026-11-27b S4).
  */
 function write_marker(string $path, string $content): bool
 {
-    @unlink($path);
-    $handle = @fopen($path, 'x');
+    $temp = $path . '.new.' . getmypid();
+    @unlink($temp);
+    $handle = @fopen($temp, 'x');
     if ($handle === false) {
         return false;
     }
-    fwrite($handle, $content);
+    @chmod($temp, 0600);
+    $ok = fwrite($handle, $content) === strlen($content);
     fclose($handle);
+    if (!$ok || !@rename($temp, $path)) {
+        @unlink($temp);
+        return false;
+    }
     return true;
 }
 
@@ -2573,7 +2607,9 @@ function idle_state(): array
     $data = json_decode((string) read_marker(IDLE_FILE), true);
     $state = [];
     foreach (is_array($data) ? $data : [] as $name => $entry) {
-        if (is_string($name) && preg_match(NAME_PATTERN, $name) && is_array($entry)
+        // Cast to string: PHP turns all-digit JSON keys like "2026" into int (audit B1).
+        $name = (string) $name;
+        if (preg_match(NAME_PATTERN, $name) && is_array($entry)
             && is_string($entry['dm'] ?? null) && is_string($entry['io'] ?? null)
             && is_int($entry['since'] ?? null)) {
             $state[$name] = ['dm' => $entry['dm'], 'io' => $entry['io'], 'since' => $entry['since'],
@@ -2583,11 +2619,26 @@ function idle_state(): array
     return $state;
 }
 
+/** Drop one volume from IDLE_FILE so a remount starts with a clean slate (audit B5). */
+function clear_idle_entry(string $name): void
+{
+    $state = idle_state();
+    if (!isset($state[$name])) {
+        return;
+    }
+    unset($state[$name]);
+    if ($state === []) {
+        @unlink(IDLE_FILE);
+    } else {
+        write_marker(IDLE_FILE, json_encode($state));
+    }
+}
+
 /** For the list: minutes left until a mounted volume is locked when idle. */
-function idle_view(string $name, ?int $minutes): array
+function idle_view(string $name, ?int $minutes, ?string $dm = null): array
 {
     $entry = $minutes === null ? null : (idle_state()[$name] ?? null);
-    if ($entry === null) {
+    if ($entry === null || ($dm !== null && $entry['dm'] !== $dm)) {
         return ['locks_in' => null, 'idle_blocked' => false];
     }
     $idle = intdiv(max(0, time() - $entry['since']), 60);
@@ -2613,7 +2664,9 @@ function open_file_below(int $pid, string $point): bool
     $fds = glob("/proc/$pid/fd/*");
     foreach ($fds === false ? [] : $fds as $fd) {
         $target = @readlink($fd);
-        if ($target !== false && below($target, $point) && is_file($target)) {
+        // Check the descriptor ($fd) itself so unlinked (" (deleted)") open
+        // files still count and symlinks inside the volume are not followed (audit B2).
+        if ($target !== false && below($target, $point) && @is_file($fd)) {
             return true;
         }
     }
@@ -2624,15 +2677,23 @@ function open_file_below(int $pid, string $point): bool
  * What keeps an idle volume from being locked without force: programs that
  * hold it open, and containers using it that are not its dependents (those are
  * stopped). Samba keeps every connected client inside the share's folder, so a
- * Samba process counts only with a file open; a connected drive with no open
- * file does not keep the volume.
+ * Samba process on this plugin's own share counts only with a file open; a
+ * connected drive with no open file does not keep the volume.
  */
 function idle_blockers(array $volume, string $point, string $dm): array
 {
     $blockers = [];
+    // Only skip directory-only Samba handles when remove_share() can actually
+    // close that share (not for MNT-2 volumes accessed via a parent user share).
+    $own_share = $volume['share'] !== null && strncmp($point, '/mnt/user/', 10) !== 0;
     foreach (holders($point) as $holder) {
+        // Processes inside a container (even with a 1:1 host bind mount) are
+        // checked via mount_users() below so dependents are excluded (audit B2).
+        if (process_container_id('/proc/' . $holder['pid']) !== null) {
+            continue;
+        }
         $comm = trim((string) @file_get_contents('/proc/' . $holder['pid'] . '/comm'));
-        if (strncmp($comm, 'smbd', 4) === 0 && !open_file_below($holder['pid'], $point)) {
+        if ($own_share && strncmp($comm, 'smbd', 4) === 0 && !open_file_below($holder['pid'], $point)) {
             continue;
         }
         $blockers[] = $holder['label'];
@@ -2694,9 +2755,9 @@ function command_idle_check(array $args, bool $json, array $extra = []): int
     $old = idle_state();
     $state = [];
     $locked = [];
-    $now = time();
     foreach ($watched as $name => $volume) {
         $name = (string) $name;
+        $now = time();   // fresh per volume, so a slow dismount does not shorten the next (audit B5)
         $vol = $live[$name] ?? null;
         $dm = dm_name(MAPPER_DIR . '/' . MAPPER_PREFIX . $name);
         $io = $dm === null ? null : io_count($dm);
@@ -2730,7 +2791,7 @@ function command_idle_check(array $args, bool $json, array $extra = []): int
         } catch (Fail $e) {
             // do_dismount has logged and reported it. Wait a full idle time
             // before the next try, so a failure is not repeated every minute.
-            $state[$name] = ['dm' => $dm, 'io' => $io, 'since' => $now, 'warned' => true];
+            $state[$name] = ['dm' => $dm, 'io' => $io, 'since' => time(), 'warned' => true];
         }
     }
     if ($state === []) {
@@ -2781,15 +2842,32 @@ function minute_check_reported(array $args, bool $json): int
     return $code;
 }
 
+/** Does a folder contain nothing but real empty folders (no files, no links)? */
+function tree_is_empty(string $dir): bool
+{
+    if (is_link($dir) || !is_dir($dir)) {
+        return false;
+    }
+    $entries = @scandir($dir);
+    if ($entries === false) {
+        return false;
+    }
+    foreach ($entries as $entry) {
+        if ($entry !== '.' && $entry !== '..' && !tree_is_empty("$dir/$entry")) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /**
  * Remove a folder if it holds nothing but empty folders, without following
- * links. Returns true if it is gone. Used for a mount folder Docker created
- * for a dependent that ran while its volume was locked; nothing with a file in
- * it is ever removed.
+ * links. Checks the whole tree first so nothing is removed when a sibling
+ * holds a file (audit S1). Returns true if it is gone.
  */
 function remove_empty_tree(string $dir): bool
 {
-    if (is_link($dir) || !is_dir($dir)) {
+    if (!tree_is_empty($dir)) {
         return false;
     }
     $entries = @scandir($dir);
@@ -2804,6 +2882,52 @@ function remove_empty_tree(string $dir): bool
     return @rmdir($dir);
 }
 
+/** Containers that DOC-6 failed to stop recently: container => timestamp. */
+function stray_failed_state(): array
+{
+    $data = json_decode((string) read_marker(STRAY_FAILED_FILE), true);
+    $state = [];
+    foreach (is_array($data) ? $data : [] as $container => $since) {
+        $container = (string) $container;
+        if (preg_match(CONTAINER_PATTERN, $container) && is_int($since)) {
+            $state[$container] = $since;
+        }
+    }
+    return $state;
+}
+
+function save_stray_failed(array $state): void
+{
+    if ($state === []) {
+        @unlink(STRAY_FAILED_FILE);
+    } else {
+        write_marker(STRAY_FAILED_FILE, json_encode($state));
+    }
+}
+
+/**
+ * Containers that are dependents of locked (or unmounted) volumes and of no
+ * mounted volume: container => list of ['volume' => name, 'grace' => seconds].
+ */
+function wanted_stray_dependents(array $config, array $live): array
+{
+    $allowed = [];
+    $wanted = [];
+    foreach ($config as $name => $volume) {
+        $name = (string) $name;
+        // Only an actually mounted volume allows its dependents to run (audit B3).
+        $mounted = ($live[$name]['mounted_at'] ?? null) !== null;
+        foreach ($volume['dependents'] as $dependent) {
+            if ($mounted) {
+                $allowed[$dependent['container']] = true;
+            } else {
+                $wanted[$dependent['container']][] = ['volume' => $name, 'grace' => $dependent['grace']];
+            }
+        }
+    }
+    return array_diff_key($wanted, $allowed);
+}
+
 /**
  * DOC-6: a dependent that runs while its volume is locked writes into an empty
  * folder instead of the volume (under /mnt/addons/ that is RAM) and keeps the
@@ -2812,26 +2936,16 @@ function remove_empty_tree(string $dir): bool
  *
  * Docker is asked first without the lock and with a short limit, so a hanging
  * Docker service never holds up a mount; the lock is taken only when there is
- * something to stop, and the state is looked at again under it. Returns the
- * containers stopped.
+ * something to stop, and both config and live state are reloaded under it.
+ * Returns the containers stopped.
  */
 function stray_dependents(): array
 {
-    $config = load_config();
-    $live = live_volumes();
-    $allowed = [];
-    $wanted = [];   // container => the locked volumes it belongs to
-    foreach ($config as $name => $volume) {
-        foreach ($volume['dependents'] as $dependent) {
-            if (isset($live[$name])) {
-                $allowed[$dependent['container']] = true;
-            } else {
-                $wanted[$dependent['container']][] = ['volume' => (string) $name, 'grace' => $dependent['grace']];
-            }
-        }
-    }
-    $wanted = array_diff_key($wanted, $allowed);
+    $wanted = wanted_stray_dependents(load_config(), live_volumes());
     if ($wanted === [] || !array_started()) {
+        if ($wanted === [] && read_marker(STRAY_FAILED_FILE) !== null) {
+            @unlink(STRAY_FAILED_FILE);
+        }
         return [];
     }
     // Only names, so Docker answers from memory and no disk is read. If Docker
@@ -2841,40 +2955,96 @@ function stray_dependents(): array
         return [];
     }
     $running = array_values(array_intersect(array_keys($wanted), preg_split('/\n/', trim($r['out']))));
-    if ($running === []) {
+    $failed = stray_failed_state();
+    $now = time();
+    // Skip containers that failed to stop recently so cron does not hold the
+    // lock and flood flash notifications every minute (audit S1).
+    $to_stop = array_values(array_filter(
+        $running,
+        fn($c) => !isset($failed[(string) $c]) || ($now - $failed[(string) $c]) >= STRAY_BACKOFF
+    ));
+    if ($to_stop === []) {
+        if ($failed !== []) {
+            $kept = array_intersect_key($failed, array_flip(array_map('strval', $running)));
+            if ($kept !== $failed) {
+                save_stray_failed($kept);
+            }
+        }
         return [];
     }
 
     $lock = take_lock();
+    // Reload both config and live state under the lock so a concurrent edit
+    // or mount is respected (audit S1).
+    $config = load_config();
     $live = live_volumes();
+    $wanted = wanted_stray_dependents($config, $live);
+    $failed = stray_failed_state();
+    $failed_changed = false;
     $stopped = [];
-    foreach ($running as $container) {
-        $volumes = array_column($wanted[$container], 'volume');
-        if (array_filter($volumes, fn($n) => isset($live[$n])) !== [] || container_running($container) !== true) {
-            continue;   // mounted or stopped meanwhile
+    foreach ($to_stop as $container) {
+        $container = (string) $container;
+        if (!array_started()) {
+            break;
         }
+        if (!isset($wanted[$container]) || container_running($container) !== true) {
+            if (isset($failed[$container])) {
+                unset($failed[$container]);
+                $failed_changed = true;
+            }
+            continue;   // mounted, detached or stopped meanwhile
+        }
+        $volumes = array_column($wanted[$container], 'volume');
         $grace = max(array_column($wanted[$container], 'grace'));
         run([program('docker'), 'stop', '-t', (string) $grace, $container], $grace + 30);
         $done = container_running($container) === false;
-        $volume = $volumes[0];
-        $message = "dependent \"$container\" was started while \"$volume\" is locked"
+        $vol_text = count($volumes) === 1
+            ? "\"{$volumes[0]}\" is locked"
+            : quoted_list($volumes) . ' are locked';
+        $message = "dependent \"$container\" was started while $vol_text"
             . ($done ? ', so it was stopped' : ', and it could not be stopped');
-        // The folder Docker made for it: gone if it holds no file, otherwise
-        // say so (never in the log by path, which would name the volume).
-        $point = $config[$volume]['mount_at'];
-        if ($done && is_dir($point) && !is_link($point) && !in_array($point, mount_points(), true)) {
-            if (strncmp($point, '/mnt/addons/', 12) === 0 && remove_empty_tree($point)) {
-                // nothing was written; the next mount works as usual
-            } elseif (count(@scandir($point) ?: []) > 2) {
+        // Check every locked volume's mount folder (audit B3). Only remove our
+        // own default /mnt/addons/<volume> folder, never custom paths or through
+        // symlinks (audit S1).
+        if ($done) {
+            if (isset($failed[$container])) {
+                unset($failed[$container]);
+                $failed_changed = true;
+            }
+            $dirty_ram = false;
+            $dirty_other = false;
+            $mounts = mount_points();
+            $addons_safe = !is_link('/mnt/addons');
+            foreach ($volumes as $vol_name) {
+                $point = $config[$vol_name]['mount_at'];
+                $own_default = $point === "/mnt/addons/$vol_name";
+                if (!is_dir($point) || is_link($point) || in_array($point, $mounts, true)) {
+                    continue;
+                }
+                if ($own_default && $addons_safe && remove_empty_tree($point)) {
+                    // nothing was written; the next mount works as usual
+                } elseif (count(@scandir($point) ?: []) > 2) {
+                    if ($own_default) {
+                        $dirty_ram = true;
+                    } else {
+                        $dirty_other = true;
+                    }
+                }
+            }
+            if ($dirty_ram || $dirty_other) {
                 $message .= '. It may have written into the volume\'s mount folder, which is not the volume'
-                    . (strncmp($point, '/mnt/addons/', 12) === 0 ? ' but RAM, lost at reboot' : '')
+                    . ($dirty_ram ? ' but RAM, lost at reboot' : '')
                     . '. Move or delete what is there before mounting the volume';
             }
+            $stopped[] = $container;
+        } else {
+            $failed[$container] = time();
+            $failed_changed = true;
         }
         log_event($message, true);
-        if ($done) {
-            $stopped[] = $container;
-        }
+    }
+    if ($failed_changed) {
+        save_stray_failed($failed);
     }
     return $stopped;
 }

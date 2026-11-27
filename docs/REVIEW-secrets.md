@@ -948,3 +948,34 @@ handler, so the suppressed warning (which would only hold a byte count) goes now
   at the real state as after a lost answer; the message says that finished work stays.
 - **3. Low, fixed:** a failing `stream_select` could spin and log a warning per pass;
   it is now silenced and followed by a 50 ms pause, as in the engine.
+
+## 13. Second external audit (2026-11-27b)
+
+Gemini ("Neon") in Antigravity audited `b90530d..419df72` (idle lock, DOC-6, B6, B8,
+B14, the small fixes) on the clean clone, read-only, and proposed a patch: report in
+`docs/AUDIT-2026-11-27b.md`. Verdict: no password or PIM leak, no shell injection, the
+password path sound. Claude reviewed the patch line by line before applying it.
+
+- **Fixed (all from the patch, tested on Bob as 2026.11.27p):** S1 (the dependent
+  check reloads the configuration under the lock, removes only the plugin's own
+  `/mnt/addons/<volume>` and only when the whole tree is empty, and retries a container
+  that could not be stopped once an hour instead of every minute), S2 (the `.plg`
+  rewrites the cron file only when its line changed, separates files in the fallback,
+  retries removal on "busy" and removes all runtime files), S3 (the password leaves PHP
+  memory as soon as the pipe has it), S4 (marker files are written in one step and are
+  readable by root only), B1 (all-digit volume names), B2 (dependents seen through the
+  same path inside their container no longer hold the idle lock; deleted open files
+  count; the Samba exception only for the plugin's own share), B3 (only a mounted
+  volume lets its dependents run; all volumes of a dependent are checked), B4
+  (`stopOther` and Cancel after a timeout), B5 (idle state cleared at mount and
+  dismount, time taken per volume), B7 (small page fixes), S5 (`php -l` also on the
+  `.page` files in the release workflow).
+- **Noted:** B6's new message for an XFS duplicate against a non-plugin disk looks for
+  "duplicate" in mount's error text, but on Bob that word appears only in the kernel
+  log, so it will rarely fire; harmless.
+- **Tested on Bob:** `php -l` on all PHP and `.page` files; `list`, `status`, `check`;
+  a marker file is `-rw-------`; a dependent started by hand was stopped; an update
+  install keeps the cron line and leaves the flash file alone ("skipping").
+- **Not tested on Bob:** the array-stop timing of the minute check and `blkid -p` on a
+  reformatted volume (audit "could not be verified" items 3 and 4).
+

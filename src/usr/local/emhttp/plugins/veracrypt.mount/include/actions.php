@@ -26,8 +26,8 @@ const VCM_TIMEOUT = 300;
 // engine's own KILL_GRACE for the programs it starts).
 const VCM_KILL_GRACE = 5;
 
-// The longest password accepted, in characters: VeraCrypt's own limit
-// (review H7), so a longer one gets a clear message instead of "wrong password".
+// The longest password accepted, in bytes: VeraCrypt's own limit
+// (review H7, audit B13), so a longer one gets a clear message instead of "wrong password".
 const VCM_MAX_PASSWORD = 128;
 
 /**
@@ -296,6 +296,8 @@ function vcm_run(string $engine, array $args, #[\SensitiveParameter] ?string $st
             if ($wrote === false || $sent >= $length) {
                 fclose($input);
                 $input = null;
+                // Drop the secret from PHP memory as soon as the pipe has it (audit 2026-11-27b S3).
+                $stdin = null;
             }
         }
         if ($read) {

@@ -55,9 +55,14 @@
                   function () { return { ok: false, code: 1, lost: true, error: 'No answer from the server.' }; });
     }
 
+    /** Whether size and free space are both known for this mounted volume. */
+    function hasUsage(v) {
+        return v.state === 'mounted' && v.size_bytes > 0 && v.free_bytes !== null && v.free_bytes !== undefined;
+    }
+
     /** Used space in percent, kept between 0 and 100 (audit B16). */
     function usedPercent(v) {
-        var p = Math.round(100 * (v.size_bytes - (v.free_bytes || 0)) / v.size_bytes);
+        var p = Math.round(100 * (v.size_bytes - v.free_bytes) / v.size_bytes);
         return Math.max(0, Math.min(100, p));
     }
 
@@ -160,7 +165,7 @@
             var state = tileState(v, orb) +
                         (v.read_only && v.state === 'mounted' ? ' <span class="vcm-ro" title="Mounted read-only">ro</span>' : '');
             var usage = '<span class="load">-</span><div class="usage-disk sys none"><span></span></div>';
-            if (v.state === 'mounted' && v.size_bytes > 0) {
+            if (hasUsage(v)) {
                 var percent = usedPercent(v);
                 usage = '<span class="load">' + percent + '%</span>' +
                         '<div class="usage-disk sys" title="' + size(v.free_bytes) + ' free of ' + size(v.size_bytes) + '">' +
@@ -254,7 +259,7 @@
             ? '<a href="/Settings/VeraCryptMount?edit=' + encodeURIComponent(v.name) + '" title="' + title + ' settings">' + esc(v.display_name) + '</a>'
             : esc(v.display_name) + ' <span class="vcm-dim">(not saved)</span>';
         if (v.read_only && mountedNow) { label += ' <span class="vcm-ro" title="Mounted read-only">ro</span>'; }
-        var known = mountedNow && v.size_bytes > 0;
+        var known = hasUsage(v);
         var sizes = '<td>-</td><td>-</td><td>-</td>';
         if (known) {
             var usedPart = usedPercent(v);
@@ -309,7 +314,7 @@
 
     /** The Usage cell of the Volumes tab: one bar above, free space and filesystem below. */
     function usageCell(v) {
-        if (v.state === 'mounted' && v.size_bytes > 0) {
+        if (hasUsage(v)) {
             var used = usedPercent(v);
             return twoLines('<span class="vcm-bar"><span class="' + barClass(used, false) + '" style="width:' + used + '%"></span></span>' + used + '%',
                             size(v.free_bytes) + ' free of ' + size(v.size_bytes) + (v.filesystem ? ' · ' + esc(v.filesystem) : ''));
@@ -789,12 +794,14 @@
     }
 
     function stopOther() {
-        busyWatch++;   // this answer replaces the quiet check
+        var id = ++busyWatch;   // this answer replaces the quiet check (audit B4)
         $('#vcm-stop-other').prop('disabled', true).val('Stopping…');
         act({ action: 'cancel-unlock' }).then(function () {
+            if (id !== busyWatch) { return; }
             var tries = 0;
             (function poll() {
                 act({ action: 'busy' }).then(function (b) {
+                    if (id !== busyWatch) { return; }
                     if (b.ok && b.busy && ++tries < 10) { setTimeout(poll, 500); return; }
                     $('#vcm-stop-other').prop('hidden', true);
                     dialogError(b.ok && !b.busy
@@ -871,6 +878,12 @@
      * volume's real state instead of guessing.
      */
     function settle(name, lost) {
+        // After a server timeout the engine was already stopped, so Cancel
+        // only closes the dialog instead of sending a stray cancel-unlock (audit B4).
+        if (lost === 'timeout') {
+            mounting = false;
+            stopProgress();
+        }
         $('#vcm-mount-submit').val('Checking…');
         var id = ++busyWatch;
         var tries = 0;
@@ -1436,7 +1449,7 @@
             toggleFields();
             // A new volume starts folded; an existing one opens the sections
             // that hold settings, so they are seen at once.
-            $('#f-mount').prop('open', !!(v.read_only || v.pim || v.hidden || (v.keyfiles || []).length));
+            $('#f-mount').prop('open', !!(v.read_only || v.pim || v.hidden || v.idle_lock || (v.keyfiles || []).length));
             $('#f-share').prop('open', !!v.share);
             $('#f-deps').prop('open', (v.dependents || []).length > 0);
             $('#f-adv').prop('open', !!(v.display_name && v.display_name !== v.name) || !own);
