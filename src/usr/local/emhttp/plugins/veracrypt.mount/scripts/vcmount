@@ -1574,19 +1574,40 @@ function holders(string $point): array
     $dirs = glob('/proc/[0-9]*', GLOB_ONLYDIR);
     foreach ($dirs === false ? [] : $dirs as $dir) {
         $fds = glob("$dir/fd/*");
-        $links = array_merge(["$dir/cwd", "$dir/root"], $fds === false ? [] : $fds);
+        // Also the program file itself (exe): a program started from the
+        // volume holds it even with no file open (audit B7).
+        $links = array_merge(["$dir/cwd", "$dir/root", "$dir/exe"], $fds === false ? [] : $fds);
+        $holds = false;
         foreach ($links as $link) {
             $target = @readlink($link);
-            if ($target === false) {
-                continue;
-            }
-            if ($target === $point || strncmp($target, "$point/", strlen($point) + 1) === 0) {
-                $found[] = ['pid' => (int) basename($dir), 'label' => program_label($dir)];
+            if ($target !== false && below($target, $point)) {
+                $holds = true;
                 break;
             }
         }
+        // And files mapped into memory (databases, libraries), which stay in
+        // use after the program closed them (audit B7).
+        if (!$holds) {
+            $maps = @file("$dir/maps", FILE_IGNORE_NEW_LINES);
+            foreach ($maps === false ? [] : $maps as $line) {
+                $slash = strpos($line, '/');
+                if ($slash !== false && below(substr($line, $slash), $point)) {
+                    $holds = true;
+                    break;
+                }
+            }
+        }
+        if ($holds) {
+            $found[] = ['pid' => (int) basename($dir), 'label' => program_label($dir)];
+        }
     }
     return $found;
+}
+
+/** Is this path the folder itself or something inside it? */
+function below(string $path, string $point): bool
+{
+    return $path === $point || strncmp($path, "$point/", strlen($point) + 1) === 0;
 }
 
 /**
@@ -1753,6 +1774,13 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
     for ($round = 0; $round < 5 && $live !== null && $live['mounted_at'] !== null; $round++) {
         $point = $live['mounted_at'];
         $r = run([program('umount'), $point], TOOL_TIMEOUT);
+        // Closing the share only asks Samba to let go; its workers may need a
+        // moment. Try again for up to two seconds before calling it busy
+        // (audit B7).
+        for ($try = 0; $r['code'] !== 0 && $try < 4; $try++) {
+            usleep(500000);
+            $r = run([program('umount'), $point], TOOL_TIMEOUT);
+        }
         if ($r['code'] !== 0 && $force) {
             $ended = end_programs(holders($point));
             if ($ended !== []) {

@@ -873,4 +873,10 @@ C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be docum
     code 1 ("Nothing to read on input") for no input. The password now always ends with
     a line break. Tested by the owner on `throwaway-the-keyfile` (keyfile only) and on
     a volume with a password: both mounted.
+  - B7: the programs holding a volume now also include programs started from it
+    (`/proc/<pid>/exe`) and files mapped into memory (`/proc/<pid>/maps`), so "still
+    in use" names them and a forced dismount can end them. After closing the share,
+    the unmount is retried for up to two seconds before the volume counts as busy.
+    Tested by the owner: a volume whose share was open in Windows Explorer dismounted
+    without "still in use".
 
