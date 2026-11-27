@@ -127,7 +127,10 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
             // With a PIM, cryptsetup reads the password as the first line and
             // the PIM as the second. A saved volume that asks for a PIM gets
             // one only when the page sent it; the engine then says it is wrong.
-            $stdin = $pim === '' ? $password : $password . "\n" . $pim . "\n";
+            // The password always ends with a line break: with keyfiles and no
+            // password, cryptsetup needs an empty line, and refuses no input
+            // at all ("Nothing to read on input", tested on Bob, audit B5).
+            $stdin = $password . "\n" . ($pim === '' ? '' : $pim . "\n");
             unset($password, $pim);
             break;
         case 'dismount':

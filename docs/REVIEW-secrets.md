@@ -867,4 +867,10 @@ C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be docum
     only processes that still have it, so a reused process number is never hit and
     finished processes are not waited for; containers are recognised by
     `docker/<ID>` or `docker-<ID>` in their cgroup (on Bob: `0::/docker/<ID>`).
+  - B5 (confirmed on Bob, then fixed): a volume with a keyfile and no password failed
+    with cryptsetup code 1, because the page sent no input at all. `cryptsetup
+    tcryptOpen --test-passphrase` with that keyfile gave code 0 for an empty line and
+    code 1 ("Nothing to read on input") for no input. The password now always ends with
+    a line break. Tested by the owner on `throwaway-the-keyfile` (keyfile only) and on
+    a volume with a password: both mounted.
 
