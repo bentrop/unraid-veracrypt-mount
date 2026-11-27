@@ -738,7 +738,7 @@
                         if (id !== busyWatch) { return; }
                         $('#vcm-stop-other').prop('hidden', true);
                         if (s.ok && s.volume && s.volume.state === 'mounted') {
-                            mounted({});
+                            mounted(s);
                         } else {
                             dialogError('The other action is over. Enter the password and click Mount.');
                         }
@@ -749,8 +749,16 @@
     }
 
     function otherBusy(name) {
+        // Nothing of this mount runs any more, so Cancel only closes the dialog
+        // from now on, and an answer for a dialog closed meanwhile is dropped
+        // (audit B8).
+        mounting = false;
+        stopProgress();
+        $('#vcm-mount-submit').val('Checking…');
         watchBusy(name);
+        var id = busyWatch;
         act({ action: 'busy' }).then(function (b) {
+            if (id !== busyWatch) { return; }
             if (b.ok && b.busy && b.unlocking_for !== null && b.unlocking_for !== undefined) {
                 var left = Math.max(0, UNLOCK_LIMIT + 5 - b.unlocking_for);
                 dialogError('Another volume is still being unlocked (for ' + clock(b.unlocking_for)
@@ -852,16 +860,24 @@
      */
     function settle(name, lost) {
         $('#vcm-mount-submit').val('Checking…');
+        var id = ++busyWatch;
         var tries = 0;
         (function poll() {
             act({ action: 'busy' }).then(function (b) {
+                if (id !== busyWatch) { return; }
                 if ((!b.ok || b.busy) && ++tries < 120) {
                     setTimeout(poll, 2000);
                     return;
                 }
                 act({ action: 'status', name: name }).then(function (s) {
+                    if (id !== busyWatch) { return; }
                     if (s.ok && s.volume && s.volume.state === 'mounted') {
-                        mounted({});
+                        // The status carries the same warnings a mount answer
+                        // would (share, dependents, top folder; audit B8).
+                        mounted(s);
+                    } else if (lost === 'timeout') {
+                        dialogError('The engine took too long and was stopped; the volume is not mounted. '
+                            + 'Please try again.');
                     } else if (lost) {
                         dialogError('The answer from the server was lost, and the volume is not mounted. '
                             + 'Most likely the password was wrong. Please try again.');
@@ -969,8 +985,9 @@
         act(data).then(function (a) {
             if (a.ok) {
                 mounted(a);
-            } else if (a.lost) {
-                settle(name, true);
+            } else if (a.lost || a.timed_out) {
+                // Either way the volume may be mounted after all: look.
+                settle(name, a.timed_out ? 'timeout' : 'lost');
             } else if (a.code === 6) {
                 otherBusy(name);
             } else {

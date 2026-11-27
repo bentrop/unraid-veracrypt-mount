@@ -557,6 +557,35 @@ function command_list(bool $json): int
     return CODE_OK;
 }
 
+/**
+ * For a mounted saved volume, what a mount answer would have warned about, in
+ * the same fields: a share that is not open, dependents that are not running,
+ * and a top folder the share cannot write to. The web page uses it when the
+ * mount's own answer was lost (audit B8). Empty for any other volume.
+ */
+function mount_problems(string $name, ?array $saved, array $v): array
+{
+    if ($saved === null || $v['state'] !== 'mounted') {
+        return [];
+    }
+    $share_error = $saved['share'] !== null && !$v['share_active']
+        ? 'Its share is not open. Dismount it and mount it again, or see the system log.' : null;
+    $failed = [];
+    if ($saved['dependents'] !== []) {
+        $ready = docker_ready();
+        foreach ($saved['dependents'] as $dependent) {
+            $running = $ready ? container_running($dependent['container']) : false;
+            if ($running !== true) {
+                $failed[] = ['container' => $dependent['container'],
+                             'reason' => !$ready ? 'the Docker service is not running'
+                                       : ($running === null ? 'there is no such container' : 'it is not running')];
+            }
+        }
+    }
+    return ['share_error' => $share_error, 'failed_dependents' => $failed,
+            'top_folder_blocked' => $share_error === null && top_folder_blocked($name, $saved)];
+}
+
 function command_status(array $args, bool $json): int
 {
     if (count($args) !== 1) {
@@ -574,7 +603,7 @@ function command_status(array $args, bool $json): int
     $v = describe($name, $saved, $live);
 
     if ($json) {
-        echo json_encode(['ok' => true, 'volume' => $v], JSON_UNESCAPED_SLASHES), "\n";
+        echo json_encode(['ok' => true, 'volume' => $v] + mount_problems($name, $saved, $v), JSON_UNESCAPED_SLASHES), "\n";
         return CODE_OK;
     }
     echo 'Name:        ', $v['name'], $v['saved'] ? '' : ' (not saved)', "\n";

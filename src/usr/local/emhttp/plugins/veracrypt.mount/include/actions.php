@@ -22,6 +22,9 @@ const VCM_NAME = '/\A[A-Za-z0-9][A-Za-z0-9_-]{0,31}\z/';
 
 // Seconds the engine may take. It stops cryptsetup itself after 180.
 const VCM_TIMEOUT = 300;
+// Seconds between asking a timed-out engine to stop and ending it (as the
+// engine's own KILL_GRACE for the programs it starts).
+const VCM_KILL_GRACE = 5;
 
 // The longest password accepted, in characters: VeraCrypt's own limit
 // (review H7), so a longer one gets a clear message instead of "wrong password".
@@ -189,6 +192,24 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
     return $answer;
 }
 
+/**
+ * End an engine that ran out of time: ask first, then force it after
+ * VCM_KILL_GRACE seconds (audit B6). proc_close() alone would wait for as long
+ * as the engine ignores the request.
+ */
+function vcm_stop($process): void
+{
+    proc_terminate($process, 15);
+    $until = microtime(true) + VCM_KILL_GRACE;
+    while (proc_get_status($process)['running'] && microtime(true) < $until) {
+        usleep(100000);
+    }
+    if (proc_get_status($process)['running']) {
+        proc_terminate($process, 9);
+    }
+    proc_close($process);
+}
+
 /** An answer that refuses a request before the engine is started. */
 function vcm_refuse(string $message): array
 {
@@ -198,6 +219,12 @@ function vcm_refuse(string $message): array
 /**
  * Start the engine and return its JSON answer. $stdin is written into its
  * standard input and then closed; null gives it an empty standard input.
+ *
+ * Writing and reading share one loop and one time limit (audit B6): a pipe
+ * takes only so much at once, so the input goes in pieces as the engine
+ * reads it, every write is checked, and an engine that stops reading or
+ * answering cannot hold this web request. If the engine ends early (for
+ * example a refused save), the rest of the input is dropped quietly.
  */
 function vcm_run(string $engine, array $args, #[\SensitiveParameter] ?string $stdin): array
 {
@@ -213,31 +240,60 @@ function vcm_run(string $engine, array $args, #[\SensitiveParameter] ?string $st
     if (!is_resource($process)) {
         return ['ok' => false, 'code' => 1, 'error' => 'The engine could not be started.'];
     }
-    if ($stdin !== null) {
-        fwrite($pipes[0], $stdin);
-    }
-    fclose($pipes[0]);
-    unset($stdin);
-
-    // Wait for the answer, with a time limit.
+    stream_set_blocking($pipes[0], false);
     stream_set_blocking($pipes[1], false);
+    $input = $pipes[0];
+    $sent = 0;
+    $length = $stdin === null ? 0 : strlen($stdin);
+    if ($length === 0) {
+        fclose($input);
+        $input = null;
+    }
+
     $out = '';
     $deadline = microtime(true) + VCM_TIMEOUT;
     while (!feof($pipes[1])) {
         $left = $deadline - microtime(true);
         if ($left <= 0) {
-            proc_terminate($process);
+            if ($input !== null) {
+                fclose($input);
+            }
+            unset($stdin);
             fclose($pipes[1]);
-            proc_close($process);
-            return ['ok' => false, 'code' => 1, 'error' => 'The engine took too long and was stopped.'];
+            vcm_stop($process);
+            // It may have done part of the work (mounted, but not all
+            // dependents started; one of several volumes dismounted). The
+            // page then looks at the real state (review of B6, finding 2).
+            return ['ok' => false, 'code' => 1, 'timed_out' => true,
+                    'error' => 'The engine took too long and was stopped. What it finished stays done; '
+                             . 'the list shows the current state.'];
         }
         $read = [$pipes[1]];
-        $write = null;
+        $write = $input === null ? null : [$input];
         $except = null;
-        if (stream_select($read, $write, $except, (int) ceil($left)) > 0) {
+        if (@stream_select($read, $write, $except, (int) ceil($left)) === false) {
+            usleep(50000);   // interrupted by a signal: look again, without spinning (review finding 3)
+            continue;
+        }
+        if ($write) {
+            // As much as the pipe takes now. false: the engine closed its input
+            // (it ended early), so the rest is not needed. PHP ignores the
+            // "broken pipe" signal; the @ keeps its warning out of the log.
+            $wrote = @fwrite($input, $sent === 0 ? $stdin : substr($stdin, $sent));
+            $sent += $wrote === false ? 0 : $wrote;
+            if ($wrote === false || $sent >= $length) {
+                fclose($input);
+                $input = null;
+            }
+        }
+        if ($read) {
             $out .= (string) fread($pipes[1], 65536);
         }
     }
+    if ($input !== null) {
+        fclose($input);
+    }
+    unset($stdin);
     fclose($pipes[1]);
     $code = proc_close($process);
 

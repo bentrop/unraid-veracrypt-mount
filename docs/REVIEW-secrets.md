@@ -900,4 +900,34 @@ C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be docum
     failed dependents.
   - Development: `scripts/deployweb.sh install` no longer brings the test list (that is
     `install-test`) and puts Unraid's favourite marks back after copying the pages.
+- **Fixed in the fourth batch (2026-11-27, tested on Bob):**
+  - B6: `vcm_run()` writes the input and reads the answer in one loop with one time
+    limit; every write is checked, an engine that ends early ends the writing quietly,
+    and a timed-out engine is asked to stop and ended after 5 seconds (`vcm_stop()`).
+    Tested on Bob: 200 KB of input written in pieces and refused cleanly; an engine
+    that ended before reading gave a clean error, no "Broken pipe".
+  - B8: a "busy" answer leaves the mounting state at once (Cancel only closes the
+    dialog), answers for a closed dialog are dropped, and after a lost or timed-out
+    answer `vcmount status --json` supplies the warnings a mount would have given
+    (share not open, dependents not running, top folder). Tested by the owner with
+    two tabs.
 
+## 12. Fourth review: `vcm_run()` and `vcm_stop()` (B6, 2026-11-27)
+
+A separate Claude session reviewed the changed password path, read-only. Verdict: no
+leak; the password cannot arrive cut off or doubled (at most 523 bytes, below the
+4096 bytes a pipe takes in one piece, so the first write delivers all of it and no
+copy is made); the loop is limited to the time limit plus 5 seconds. Checked on Bob:
+php-fpm workers ignore SIGPIPE, and Unraid's `local_prepend.php` sets no error
+handler, so the suppressed warning (which would only hold a byte count) goes nowhere.
+
+- **1. Low, accepted by the owner:** "Dismount all" from the page can now be ended in
+  the middle of a volume when it runs past the time limit (only with grace periods
+  above 300 seconds in total, which LIFE-3 already warns about). Nothing is left
+  broken: the next dismount continues from the live state. With fix 2 the page shows
+  the real state.
+- **2. Low, fixed:** after the time limit the page treated a mount as failed although
+  the volume could be mounted. The answer now carries `timed_out`, and the page looks
+  at the real state as after a lost answer; the message says that finished work stays.
+- **3. Low, fixed:** a failing `stream_select` could spin and log a warning per pass;
+  it is now silenced and followed by a 50 ms pause, as in the engine.
