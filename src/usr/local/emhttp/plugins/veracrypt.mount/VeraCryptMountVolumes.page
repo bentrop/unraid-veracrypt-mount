@@ -80,42 +80,45 @@ $vcm = '/plugins/veracrypt.mount';
   <h3 id="vcm-edit-title">Add volume</h3>
   <form id="vcm-edit-form" autocomplete="off" onsubmit="return false">
     <dl class="vcm-form">
-      <dt>Name</dt>
-      <dd><input type="text" id="e-name" maxlength="32" spellcheck="false" autocomplete="off">
-          <span class="vcm-note">Letters, digits, - and _. Used for the mount folder and the share name.</span></dd>
       <dt>Volume file</dt>
       <dd><input type="text" id="e-file" spellcheck="false" autocomplete="off" placeholder="/mnt/user/..."
-                 data-pickroot="/mnt/" data-pickcloseonfile="true">
-          <span class="vcm-note">When the name is empty, it is filled from the file name.</span></dd>
-      <dt>Mount read-only</dt>
-      <dd><label class="vcm-check"><input type="checkbox" id="e-ro"> The files on the volume stay untouched. Nothing can change, add or delete them, here or over the network.</label></dd>
+                 data-pickroot="/mnt/" data-pickcloseonfile="true"></dd>
+      <dt>Name</dt>
+      <dd><input type="text" id="e-name" maxlength="32" spellcheck="false" autocomplete="off"
+                 placeholder="letters, digits, - and _"></dd>
     </dl>
-    <p class="vcm-note">A new volume needs only a name and a file. Everything else starts with a safe default.</p>
 
-    <details class="vcm-fold">
-      <summary>Unlocking <span class="vcm-sum" id="s-unlock"></span></summary>
+    <!-- As VeraCrypt's own "Mount Options": read-only belongs with the hidden
+         volume, which on Linux only read-only protects. Every extra is
+         switched on by its box, as in the mount dialog. -->
+    <details class="vcm-fold" id="f-mount">
+      <summary>Mount options <span class="vcm-sum" id="s-unlock"></span></summary>
       <dl class="vcm-form">
-        <!-- One field per keyfile, as Unraid's Docker template lists paths. -->
-        <dt class="vcm-first-line">Keyfiles</dt>
-        <dd class="vcm-first-line"><div id="e-keyfiles"></div>
+        <dt>&nbsp;</dt>
+        <dd class="vcm-optlist">
+          <label class="vcm-check"><input type="checkbox" id="e-ro"> <span>Read-only: nothing on the volume can be
+            changed, here or over the network.</span></label>
+          <label class="vcm-check"><input type="checkbox" id="e-use-keyfiles"> <span>Uses keyfiles</span></label>
+          <div id="e-keyfiles-box" class="vcm-sub" hidden>
+            <!-- One field per keyfile, as Unraid's Docker template lists paths. -->
+            <div id="e-keyfiles"></div>
             <a href="#" id="e-keyfile-add"><i class="fa fa-fw fa-plus"></i> Add another keyfile</a>
             <span class="vcm-note">Only the path is saved, never the file's content. A keyfile on this
               server's own disks does not protect against theft of the whole server; prefer a removable
-              drive.</span></dd>
-        <dt>PIM</dt>
-        <dd><label class="vcm-check"><input type="checkbox" id="e-pim"> Ask for a PIM when mounting.
-            The PIM itself is never saved.</label></dd>
-        <dt>Hidden volume</dt>
-        <dd><label class="vcm-check"><input type="checkbox" id="e-hidden"> Open the hidden volume inside
-            this file, with the hidden volume's password. Saving this reveals that the file holds one;
-            to avoid that, use <b>Mount a file once</b>.</label></dd>
+              drive.</span>
+          </div>
+          <label class="vcm-check"><input type="checkbox" id="e-pim"> <span>Ask for a PIM when mounting.
+            The PIM itself is never saved.</span></label>
+          <label class="vcm-check"><input type="checkbox" id="e-hidden"> <span>Open the hidden volume inside
+            this file. Saving this reveals that the file holds one; to avoid that, use
+            <b>Mount a file once</b>.</span></label>
+          <span class="vcm-note">If this file also holds a hidden volume, mount it read-only: Linux cannot
+            protect the hidden one.</span>
+        </dd>
       </dl>
-      <p class="vcm-warning" id="e-hidden-warn">If this file holds a hidden volume, mounting the outer
-         volume read-write can overwrite and destroy the hidden one: Linux has no protection for it.
-         Mount the outer volume read-only.</p>
     </details>
 
-    <details class="vcm-fold">
+    <details class="vcm-fold" id="f-share">
       <summary>Network share <span class="vcm-sum" id="s-share"></span></summary>
       <dl class="vcm-form">
         <dt>Share over the network (SMB)</dt>
@@ -131,19 +134,21 @@ $vcm = '/plugins/veracrypt.mount';
       <p class="vcm-note vcm-share-on">Only users given access can connect. Guests never can, as with Unraid's "Private" share security.</p>
     </details>
 
-    <details class="vcm-fold">
+    <details class="vcm-fold" id="f-deps">
       <summary>Dependents <span class="vcm-sum" id="s-deps"></span></summary>
       <p class="vcm-note">Containers that run only while this volume is mounted. Started top to bottom,
          stopped bottom to top. Drag to reorder.</p>
       <ul id="e-deps" class="vcm-deps"></ul>
       <p class="vcm-warning" id="e-deps-time" hidden></p>
-      <div class="vcm-buttons">
-        <select id="e-dep-choice"></select>
-        <input type="button" id="e-dep-add" value="Add dependent">
-      </div>
+      <!-- In the field column, as the other sections' fields. -->
+      <dl class="vcm-form">
+        <dt>Add</dt>
+        <dd><div class="vcm-dep-add"><select id="e-dep-choice"></select>
+            <input type="button" id="e-dep-add" value="Add"></div></dd>
+      </dl>
     </details>
 
-    <details class="vcm-fold">
+    <details class="vcm-fold" id="f-adv">
       <summary>Advanced <span class="vcm-sum" id="s-adv"></span></summary>
       <dl class="vcm-form">
         <dt>Display name</dt>

@@ -1100,6 +1100,11 @@
         });
     }
 
+    /** The edit panel's keyfiles: only while "Uses keyfiles" is ticked. */
+    function editKeyfiles() {
+        return $('#e-use-keyfiles').is(':checked') ? keyfilePaths('#e-keyfiles') : [];
+    }
+
     /** The filled-in keyfile paths, without empty fields or repeats. */
     function keyfilePaths(list) {
         var paths = [];
@@ -1147,9 +1152,10 @@
         }
         $('#s-share').text(share);
         var unlock = ['password'];
-        var kf = keyfilePaths().length;
+        var kf = editKeyfiles().length;
         if (kf) { unlock.push(kf === 1 ? '1 keyfile' : kf + ' keyfiles'); }
         if ($('#e-pim').is(':checked')) { unlock.push('PIM'); }
+        if ($('#e-ro').is(':checked')) { unlock.push('read-only'); }
         $('#s-unlock').text(unlock.join(', ') + ($('#e-hidden').is(':checked') ? ' · hidden volume' : ''));
         var deps = $('#e-deps li').map(function () { return $(this).attr('data-container'); }).get();
         $('#s-deps').text(deps.length ? deps.join(', ') : 'none');
@@ -1209,8 +1215,7 @@
         applyReadOnly();
         $('.vcm-share-on').toggle($('#e-share').val() === 'yes');
         $('.vcm-mount-share').toggle($('#e-mount-mode').val() === 'share');
-        // VOL-4: the warning matters only while the outer volume may be written.
-        $('#e-hidden-warn').toggle(!$('#e-ro').is(':checked') && !$('#e-hidden').is(':checked'));
+        $('#e-keyfiles-box').prop('hidden', !$('#e-use-keyfiles').is(':checked'));
         var name = $.trim($('#e-name').val());
         $('#e-own-point').text(name ? '/mnt/addons/' + name : '');
         updateSummaries();
@@ -1285,6 +1290,7 @@
             $('#e-pim').prop('checked', !!v.pim);
             $('#e-hidden').prop('checked', !!v.hidden);
             $('#e-keyfiles').empty();
+            $('#e-use-keyfiles').prop('checked', (v.keyfiles || []).length > 0);
             ((v.keyfiles || []).length ? v.keyfiles : ['']).forEach(function (p) { addKeyfileRow(p); });
             var own = !v.mount_at || v.mount_at === '/mnt/addons/' + v.name;
             $('#e-mount-mode').val(own ? 'own' : 'share');
@@ -1309,9 +1315,15 @@
             editError('');
             markClean();
             toggleFields();
+            // A new volume starts folded; an existing one opens the sections
+            // that hold settings, so they are seen at once.
+            $('#f-mount').prop('open', !!(v.read_only || v.pim || v.hidden || (v.keyfiles || []).length));
+            $('#f-share').prop('open', !!v.share);
+            $('#f-deps').prop('open', (v.dependents || []).length > 0);
+            $('#f-adv').prop('open', !!(v.display_name && v.display_name !== v.name) || !own);
             $('#vcm-list').hide();
             $('#vcm-edit').prop('hidden', false);
-            $('#e-name').trigger('focus');
+            $(editing ? '#e-name' : '#e-file').trigger('focus');
         });
     }
 
@@ -1334,7 +1346,7 @@
         if ($('#e-ro').is(':checked')) { v.read_only = true; }
         if ($('#e-hidden').is(':checked')) { v.hidden = true; }
         if ($('#e-pim').is(':checked')) { v.pim = true; }
-        var keyfiles = keyfilePaths();
+        var keyfiles = editKeyfiles();
         if (keyfiles.length) { v.keyfiles = keyfiles; }
         if ($('#e-share').val() === 'yes') {
             var users = {};
@@ -1511,6 +1523,10 @@
             $(this).closest('.vcm-keyfile').remove();
             keyfileRows(list);
             if (list === '#e-keyfiles') { markDirty(); updateSummaries(); }
+        });
+        // Edit panel: the keyfile list appears when "Uses keyfiles" is ticked.
+        $('#e-use-keyfiles').on('change', function () {
+            if (this.checked) { setTimeout(function () { $('#e-keyfiles .e-keyfile').first().trigger('focus'); }, 0); }
         });
         // "Mount a file once": an extra appears when its box is ticked.
         $('#vcm-use-pim').on('change', function () {
