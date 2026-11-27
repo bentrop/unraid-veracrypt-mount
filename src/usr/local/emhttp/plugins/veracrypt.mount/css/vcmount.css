@@ -1,18 +1,7 @@
 /* VeraCrypt Mount: styles shared by the plugin's pages. Colours come from the
    active Unraid theme wherever possible (UI-1). */
 
-.vcm-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-.vcm-table th { text-align: left; font-weight: normal; opacity: .7; padding: 6px 8px; }
-.vcm-table td { padding: 8px; border-top: 1px solid rgba(128, 128, 128, .25); vertical-align: middle; }
-.vcm-table td.vcm-empty { text-align: center; opacity: .7; }
-.vcm-table .vcm-sub { display: block; font-size: .85em; opacity: .7; }
-.vcm-table input[type=button] { margin: 0 4px 0 0; }
 
-.vcm-state { white-space: nowrap; }
-.vcm-state::before { content: "\25CF\00a0"; }
-.vcm-state.mounted::before { color: #3c9a3c; }
-.vcm-state.locked::before { color: #888; }
-.vcm-state.unlocked::before { color: #d08a00; }
 
 .vcm-buttons { margin-top: 12px; }
 /* Progress while unlocking; the bar uses the colours of Unraid's buttons. */
@@ -39,9 +28,6 @@
 .vcm-box h3 { margin-top: 0; }
 .vcm-box label { display: block; margin: 10px 0; }
 /* A field outside its label (the file field, because of Unraid's file picker). */
-.vcm-box .vcm-field { margin: 10px 0; }
-.vcm-box .vcm-field label { margin: 0; }
-.vcm-box .vcm-field input[type=text] { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; }
 .vcm-box input[type=text], .vcm-box input[type=password] { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; }
 .vcm-box label.vcm-check { display: flex; align-items: center; gap: 6px; }
 /* The mount dialog: labels beside the fields, extras below the password. */
@@ -55,7 +41,6 @@
 .vcm-box .vcm-sub { margin: -2px 0 2px 24px; }
 .vcm-box .vcm-keyfile { max-width: none; }
 
-.vcm-table td.vcm-actions { white-space: nowrap; }
 
 /* The edit panel. */
 #vcm-edit { max-width: 900px; }
@@ -108,7 +93,6 @@
 .vcm-dep.vcm-dep-gap { visibility: visible !important; border-style: dashed; opacity: .5; }
 #e-deps { padding: 4px 0; }
 .vcm-dep-remove { margin-left: auto; text-decoration: none; }
-.vcm-keyfile-remove { text-decoration: none; }
 .vcm-keyfile-remove { margin-left: 8px; text-decoration: none; }
 
 /* Present for password managers, invisible to people. */
@@ -117,8 +101,6 @@
 @media (max-width: 760px) {
   .vcm-form { grid-template-columns: 1fr; }
   .vcm-sum { float: none; display: block; }
-  .vcm-table th:nth-child(4), .vcm-table td:nth-child(4),
-  .vcm-table th:nth-child(6), .vcm-table td:nth-child(6) { display: none; }
 }
 
 /* The breadcrumb, in Unraid's title bar like the file manager's, or in its own
@@ -171,7 +153,6 @@ table.vcm-main .vcm-tile-icon { margin-right: 6px; }
 .vcm-privacy-line { width: 100%; max-width: 560px; box-sizing: border-box; font-family: monospace; }
 
 /* A volume being dismounted: its control spins and cannot be clicked. */
-.vcm-busy-icon { margin: 0 6px 0 2px; opacity: .7; }
 .vcm-tile-icon.vcm-busy { color: #d08a00; cursor: progress; }
 .vcm-info-list a.vcm-busy { opacity: .5; cursor: progress; }
 

@@ -79,8 +79,10 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
             if (strpbrk($password, "\0\r\n") !== false) {
                 return vcm_refuse('The password contains a line break.');
             }
-            if (mb_strlen($password, 'UTF-8') > VCM_MAX_PASSWORD) {
-                return vcm_refuse('The password is longer than VeraCrypt allows (' . VCM_MAX_PASSWORD . ' characters).');
+            // VeraCrypt counts bytes: a letter such as ü takes two (audit B13).
+            if (strlen($password) > VCM_MAX_PASSWORD) {
+                return vcm_refuse('The password is longer than VeraCrypt allows (' . VCM_MAX_PASSWORD
+                    . ' bytes; letters such as ü count twice, emoji four times).');
             }
             // The PIM, if the volume has one: digits only, sent after the
             // password on the engine's standard input (SEC-1), never as an argument.
@@ -89,6 +91,17 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
                 return vcm_refuse('The PIM must be a whole number from 1 upwards, without spaces.');
             }
             if ($action === 'mount') {
+                // What the saved volume needs, so a missing PIM or an empty
+                // password without keyfiles gets a clear answer instead of
+                // "wrong password" after a long unlock (review K4, audit S11).
+                $status = vcm_run($engine, ['status', $name, '--json'], null);
+                $saved = is_array($status['volume'] ?? null) ? $status['volume'] : null;
+                if ($saved !== null && !empty($saved['pim']) && $pim === '') {
+                    return vcm_refuse('This volume asks for a PIM. Enter it.');
+                }
+                if ($saved !== null && $password === '' && ($saved['keyfiles'] ?? []) === []) {
+                    return vcm_refuse('Enter the password.');
+                }
                 $args = ['mount', $name];
             } else {
                 // Mount without saving (VOL-5).
@@ -172,14 +185,13 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
             $args = ['save-config'];
             // The revision read with "config". The engine refuses to save when
             // the file has changed since, so no change is overwritten unseen.
+            // Always required from the page (audit S11).
             $revision = $post['revision'] ?? null;
-            if ($revision !== null) {
-                if (!is_string($revision) || !preg_match('/\A([0-9a-f]{64}|none)\z/', $revision)) {
-                    return vcm_refuse('That is not a valid revision.');
-                }
-                $args[] = '--revision';
-                $args[] = $revision;
+            if (!is_string($revision) || !preg_match('/\A([0-9a-f]{64}|none)\z/', $revision)) {
+                return vcm_refuse('The settings could not be saved: the page did not say which version it read. Reload the page.');
             }
+            $args[] = '--revision';
+            $args[] = $revision;
             $stdin = $config;
             break;
         default:

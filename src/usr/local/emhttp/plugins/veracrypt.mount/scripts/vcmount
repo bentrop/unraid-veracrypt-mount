@@ -533,7 +533,10 @@ function format_size(?int $bytes): string
     if ($bytes === null) {
         return '-';
     }
-    return $bytes < 1e9 ? sprintf('%d MB', $bytes / 1e6) : sprintf('%.1f GB', $bytes / 1e9);
+    if ($bytes < 1e9) {
+        return sprintf('%d MB', round($bytes / 1e6));
+    }
+    return $bytes < 1e12 ? sprintf('%.1f GB', $bytes / 1e9) : sprintf('%.1f TB', $bytes / 1e12);
 }
 
 function command_list(bool $json): int
@@ -1513,8 +1516,9 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
         throw new Fail("cryptsetup could not open the volume (its result code was {$r['code']}).", CODE_USAGE);
     }
 
-    // Which filesystem is inside?
-    $r = run([program('blkid'), '-o', 'value', '-s', 'TYPE', $device], TOOL_TIMEOUT);
+    // Which filesystem is inside? -p reads the device itself, never blkid's
+    // cache, which could still hold an earlier volume of this name (audit B14).
+    $r = run([program('blkid'), '-p', '-o', 'value', '-s', 'TYPE', $device], TOOL_TIMEOUT);
     $found = trim($r['out']);
     // FS-1: every file system both VeraCrypt and Unraid support. ext2 and ext3
     // are mounted with the ext4 driver, which reads them.
@@ -1533,8 +1537,18 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
 
     // Unlocking can take minutes. Look again at what may have changed
     // meanwhile: the mount location (audit S1) and a network client opening
-    // the volume file (VOL-7, audit S12).
+    // the volume file (VOL-7, audit S12). And a copy of a mounted XFS volume:
+    // XFS refuses a second file system with the same ID (audit B14). Btrfs
+    // gives such a copy a temporary ID of its own (kernel 6.7 and later).
     try {
+        if ($found === 'xfs') {
+            $twin = xfs_twin($name, $device);
+            if ($twin !== null) {
+                throw new Fail("Refused: its file system has the same ID (UUID) as the mounted volume \"$twin\", "
+                    . 'so it is probably a copy of it. XFS cannot mount both at once. Dismount "'
+                    . $twin . '" first.', CODE_REFUSED);
+            }
+        }
         check_mount_point($point);
         $client = network_open($real) ?? ($real === $file ? null : network_open($file));
         if ($client !== null) {
@@ -1594,6 +1608,34 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
             CODE_FILESYSTEM
         );
     }
+}
+
+/** The ID (UUID) of the file system on a device, read from the device itself. */
+function filesystem_uuid(string $device): string
+{
+    $r = run([program('blkid'), '-p', '-o', 'value', '-s', 'UUID', $device], TOOL_TIMEOUT);
+    return $r['code'] === 0 ? trim($r['out']) : '';
+}
+
+/**
+ * Another unlocked volume of this plugin whose XFS file system has the same ID
+ * as this device, typically the original of a copied volume file. Returns its
+ * name, or null.
+ */
+function xfs_twin(string $name, string $device): ?string
+{
+    $uuid = filesystem_uuid($device);
+    if ($uuid === '') {
+        return null;
+    }
+    foreach (live_volumes() as $other => $live) {
+        $other = (string) $other;
+        if ($other !== $name && $live['filesystem'] === 'xfs'
+            && filesystem_uuid(MAPPER_DIR . '/' . MAPPER_PREFIX . $other) === $uuid) {
+            return $other;
+        }
+    }
+    return null;
 }
 
 function command_mount(array $args, array $options, bool $json): int
@@ -2441,7 +2483,10 @@ function command_privacy(array $args, bool $json): int
     $folders = [];
     foreach (load_config() as $volume) {
         $mount = strncmp($volume['mount_at'], '/mnt/addons/', 12) === 0 ? '/mnt/addons' : $volume['mount_at'];
-        foreach ([$mount, dirname($volume['file'])] as $dir) {
+        // Keyfile folders too: File Activity would note every read of a
+        // keyfile, with its path and the time of each unlock (audit S10).
+        $dirs = array_merge([$mount, dirname($volume['file'])], array_map('dirname', $volume['keyfiles']));
+        foreach ($dirs as $dir) {
             $folders[rtrim($dir, '/')] = true;
         }
     }
@@ -2451,7 +2496,9 @@ function command_privacy(array $args, bool $json): int
         $parts[] = exclusion_part($dir);
         $samples = [$dir . '/file'];
         if (preg_match('#^/mnt/user0?/(.+)$#', $dir, $m)) {
+            // Its spelling on an array disk and on a pool (audit S10).
             $samples[] = '/mnt/disk1/' . $m[1] . '/file';
+            $samples[] = '/mnt/cache/' . $m[1] . '/file';
         }
         $covered = $readable;
         foreach ($samples as $sample) {
@@ -2924,7 +2971,7 @@ function top_folder_blocked(string $name, ?array $saved): bool
 }
 
 /** The mount point of a volume mounted read-write with a file system that has owners. */
-function owner_fs_point(string $name, bool $any_fs = false): string
+function owner_fs_point(string $name): string
 {
     if (!preg_match(NAME_PATTERN, $name)) {
         throw new Fail('That is not a valid volume name.', CODE_USAGE);
@@ -2936,7 +2983,7 @@ function owner_fs_point(string $name, bool $any_fs = false): string
     if ($live['read_only']) {
         throw new Fail("\"$name\" is mounted read-only. Mount it read-write first.", CODE_REFUSED);
     }
-    if (!$any_fs && !in_array($live['filesystem'] ?? '', OWNER_FILESYSTEMS, true)) {
+    if (!in_array($live['filesystem'] ?? '', OWNER_FILESYSTEMS, true)) {
         throw new Fail("\"$name\" has no owners to change ({$live['filesystem']}): every file already appears as nobody:users.", CODE_REFUSED);
     }
     return $live['mounted_at'];
@@ -3051,7 +3098,10 @@ function command_info(array $args, bool $json): int
              'dependents' => [], 'log' => []];
 
     if (is_string($v['file']) && is_file($v['file'])) {
-        $info['file'] = ['size_bytes' => filesize($v['file']) ?: null, 'modified' => date('c', filemtime($v['file']) ?: 0)];
+        $bytes = @filesize($v['file']);
+        $changed = @filemtime($v['file']);
+        $info['file'] = ['size_bytes' => $bytes === false ? null : $bytes,
+                         'modified' => $changed === false ? null : date('c', $changed)];
     }
 
     if ($live !== null) {
@@ -3066,7 +3116,7 @@ function command_info(array $args, bool $json): int
         $info['crypt'] = $crypt ?: null;
 
         $fs = [];
-        $r = run([program('blkid'), '-o', 'export', $device], TOOL_TIMEOUT);
+        $r = run([program('blkid'), '-p', '-o', 'export', $device], TOOL_TIMEOUT);
         foreach (preg_split('/\n/', $r['out']) as $line) {
             if (preg_match('/^(TYPE|LABEL|UUID)=(.*)$/', $line, $m)) {
                 $fs[strtolower($m[1])] = $m[2];
@@ -3319,7 +3369,8 @@ function parse_args(array $args): array
                 throw new Fail("$arg needs a value.", CODE_USAGE);
             }
             $options[$values[$arg]] = array_shift($args);
-        } elseif (strncmp($arg, '--', 2) === 0 && $arg !== '--help') {
+        } elseif ($arg !== '--help' && strlen($arg) > 1 && $arg[0] === '-') {
+            // Also short ones such as -h: no name or path starts with a dash.
             throw new Fail("Unknown option $arg.", CODE_USAGE);
         } else {
             $plain[] = $arg;

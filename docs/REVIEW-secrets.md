@@ -912,6 +912,23 @@ C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be docum
     (share not open, dependents not running, top folder). Tested by the owner with
     two tabs.
 
+- **B14 (2026-11-27, tested on Bob with file copies of two throwaway volumes):** XFS
+  refuses a copy while its original is mounted ("duplicate UUID"), and the plugin
+  wrongly advised `xfs_repair`; it now compares the ID with its own mounted XFS volumes
+  first and refuses with a clear message. Btrfs on Unraid 7.4 (kernel 6.12) mounts such
+  a copy with a temporary ID of its own, so nothing is needed there. `blkid` now reads
+  the device itself (`-p`), never its cache.
+
+- **Small items (2026-11-27):** S10 (File Activity check covers keyfile folders and a
+  pool spelling; closing "Mount a file once" clears its fields), S11 and review K4 (the
+  web side refuses a saved volume's mount without its PIM, or with an empty password and
+  no keyfile, before cryptsetup runs; saving settings requires the revision), B13 (the
+  password limit counts bytes, as VeraCrypt does), B15 (sizes in TB, a 0-byte volume
+  file, short options refused), B16 (HTTPS link without the HTTP port, Apply after a
+  refused Remove, usage clamped, whole seconds), B17 (dead CSS and code). Still open:
+  S12 (one folder for the marker files), B16.10 (dialog accessibility), B17.1 (one set
+  of validation rules), C3, C5 and a few cosmetic items.
+
 ## 12. Fourth review: `vcm_run()` and `vcm_stop()` (B6, 2026-11-27)
 
 A separate Claude session reviewed the changed password path, read-only. Verdict: no

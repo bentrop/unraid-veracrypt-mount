@@ -10,7 +10,9 @@ The volumes stay ordinary VeraCrypt volumes: you can still open them with VeraCr
 Windows, just not on both at once.
 
 > **Status: early.** Tested on Unraid 7.4 with throwaway volumes. Try it with a copy of
-> a volume before you trust it with your only one, and keep backups.
+> a volume before you trust it with your only one, and keep backups. An XFS volume and
+> its copy cannot be mounted at the same time (they share a file system ID); the plugin
+> says so and refuses the second. Btrfs copies can.
 
 ## Features
 

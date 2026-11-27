@@ -55,9 +55,16 @@
                   function () { return { ok: false, code: 1, lost: true, error: 'No answer from the server.' }; });
     }
 
+    /** Used space in percent, kept between 0 and 100 (audit B16). */
+    function usedPercent(v) {
+        var p = Math.round(100 * (v.size_bytes - (v.free_bytes || 0)) / v.size_bytes);
+        return Math.max(0, Math.min(100, p));
+    }
+
     function size(bytes) {
         if (bytes === null || bytes === undefined) { return '-'; }
-        return bytes < 1e9 ? Math.round(bytes / 1e6) + ' MB' : (bytes / 1e9).toFixed(1) + ' GB';
+        if (bytes < 1e9) { return Math.round(bytes / 1e6) + ' MB'; }
+        return bytes < 1e12 ? (bytes / 1e9).toFixed(1) + ' GB' : (bytes / 1e12).toFixed(1) + ' TB';
     }
 
     function message(title, text, type) {
@@ -154,7 +161,7 @@
                         (v.read_only && v.state === 'mounted' ? ' <span class="vcm-ro" title="Mounted read-only">ro</span>' : '');
             var usage = '<span class="load">-</span><div class="usage-disk sys none"><span></span></div>';
             if (v.state === 'mounted' && v.size_bytes > 0) {
-                var percent = Math.round(100 * (v.size_bytes - v.free_bytes) / v.size_bytes);
+                var percent = usedPercent(v);
                 usage = '<span class="load">' + percent + '%</span>' +
                         '<div class="usage-disk sys" title="' + size(v.free_bytes) + ' free of ' + size(v.size_bytes) + '">' +
                         '<span class="' + barClass(percent, false) + '" style="width:' + percent + '%"></span><span></span></div>';
@@ -250,7 +257,7 @@
         var known = mountedNow && v.size_bytes > 0;
         var sizes = '<td>-</td><td>-</td><td>-</td>';
         if (known) {
-            var usedPart = Math.round(100 * (v.size_bytes - v.free_bytes) / v.size_bytes);
+            var usedPart = usedPercent(v);
             sizes = '<td>' + size(v.size_bytes) + '</td>' +
                     '<td><div class="usage-disk"><span class="' + barClass(usedPart, false) + '" style="width:' + usedPart + '%"></span>' +
                     '<span>' + size(v.size_bytes - v.free_bytes) + '</span></div></td>' +
@@ -303,7 +310,7 @@
     /** The Usage cell of the Volumes tab: one bar above, free space and filesystem below. */
     function usageCell(v) {
         if (v.state === 'mounted' && v.size_bytes > 0) {
-            var used = Math.round(100 * (v.size_bytes - v.free_bytes) / v.size_bytes);
+            var used = usedPercent(v);
             return twoLines('<span class="vcm-bar"><span class="' + barClass(used, false) + '" style="width:' + used + '%"></span></span>' + used + '%',
                             size(v.free_bytes) + ' free of ' + size(v.size_bytes) + (v.filesystem ? ' · ' + esc(v.filesystem) : ''));
         }
@@ -622,7 +629,9 @@
         $('#vcm-mount-error').prop('hidden', true).text('');
         $('#vcm-dialog-http').prop('hidden', !overHttp || blocked);
         $('#vcm-dialog-https').prop('hidden', !blocked);
-        $('#vcm-https-link').attr('href', 'https://' + window.location.host + window.location.pathname + window.location.search);
+        // The host name without the HTTP port (audit B16): Unraid's HTTPS
+        // port is the default one unless it was changed.
+        $('#vcm-https-link').attr('href', 'https://' + window.location.hostname + window.location.pathname + window.location.search);
         $('#vcm-password-label').prop('hidden', blocked);
         $('#vcm-mount-submit').toggle(!blocked);
         $('#vcm-once-fields').prop('hidden', !once || blocked);
@@ -640,6 +649,9 @@
         if (!mounting) { busyWatch++; }
         if (mounting) { return; }   // not while a mount is on its way
         $('#vcm-password, #vcm-pim').val('');
+        // "Mount a file once" leaves no trace in the page either (audit S10).
+        $('#vcm-file, #vcm-name').val('');
+        $('#vcm-keyfiles').empty();
         $('#vcm-modal').prop('hidden', true);
         mountTarget = null;
     }
@@ -1140,8 +1152,8 @@
         return $('<li class="vcm-dep">' +
             '<span class="vcm-handle" title="Drag to reorder">&#9776;</span>' +
             '<span class="vcm-dep-name">' + esc(dep.container) + (known ? '' : ' <em>(not found)</em>') + '</span>' +
-            '<label>stop within <input type="number" class="e-grace" min="1" max="600" value="' + esc(dep.grace) + '"> s</label>' +
-            '<label>then wait <input type="number" class="e-delay" min="0" max="600" value="' + esc(dep.delay) + '"> s</label>' +
+            '<label>stop within <input type="number" class="e-grace" min="1" max="600" step="1" value="' + esc(dep.grace) + '"> s</label>' +
+            '<label>then wait <input type="number" class="e-delay" min="0" max="600" step="1" value="' + esc(dep.delay) + '"> s</label>' +
             // Unraid's own warning mark, as on its Docker and Main pages.
             (why.length ? '<span class="vcm-dep-alone" title="' + esc(whyLong.join(' ')) +
                      '"><i class="fa fa-warning orange-text"></i> ' + esc(why.join(', ')) + '</span>' : '') +
@@ -1504,6 +1516,9 @@
         act(data).then(function (a) {
             $('#e-add, #e-apply, #e-done, #e-remove').prop('disabled', false);
             if (!a.ok) {
+                // Apply stays greyed out unless there are changes (audit B16):
+                // a refused "Remove" changed nothing in the form.
+                $('#e-apply').prop('disabled', !dirty);
                 editError(a.error || 'The settings could not be saved.');
                 return;
             }
