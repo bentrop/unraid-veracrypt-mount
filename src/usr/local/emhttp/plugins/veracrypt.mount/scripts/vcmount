@@ -102,6 +102,8 @@ Usage:
   vcmount dismount --all --array-stop        as the array-stop hook calls it: forced
                                              unless the setting turns that off
   vcmount stop-dependents --all              stop the dependents of every mounted volume
+      With --within <seconds> (also for dismount --all) the work is fitted
+      into that time: shorter grace periods, and what does not fit is left.
   vcmount start-dependents --all             start the dependents of every mounted volume
   vcmount cancel-unlock                      stop a mount that is still checking the password
   vcmount repair-shares                      make the SMB shares match the mounted volumes
@@ -834,6 +836,50 @@ function start_dependents(string $volume, array $dependents): array
  * Returns, per dependent that was running: container, result (stopped, killed
  * or failed) and a message.
  */
+/*
+ * Array stop and shutdown (audit S2). The hooks say how many seconds they
+ * have (--within); the engine then shares that time out instead of being cut
+ * off half-way. A stop signal from the hook's time limit only asks: the volume
+ * being worked on is finished, the rest is left to Unraid.
+ */
+$GLOBALS['vcm_deadline'] = null;   // microtime() by which to be done, or null
+$GLOBALS['vcm_stop'] = false;      // a stop signal arrived
+
+/** Take the time limit from --within and catch stop signals from now on. */
+function watch_time(array $options): void
+{
+    if ($options['within'] !== null) {
+        if (!preg_match('/\A[1-9][0-9]{0,3}\z/', $options['within'])) {
+            throw new Fail('--within needs a number of seconds from 1 to 9999.', CODE_USAGE);
+        }
+        $GLOBALS['vcm_deadline'] = microtime(true) + (int) $options['within'];
+    }
+    pcntl_async_signals(true);
+    foreach ([SIGINT, SIGTERM, SIGHUP] as $signal) {
+        pcntl_signal($signal, function () { $GLOBALS['vcm_stop'] = true; });
+    }
+}
+
+/** Seconds left before the deadline, or null without one. */
+function time_left(): ?float
+{
+    return $GLOBALS['vcm_deadline'] === null ? null : $GLOBALS['vcm_deadline'] - microtime(true);
+}
+
+/** Should the next volume or dependent be left alone? */
+function out_of_time(float $needs = 3): bool
+{
+    $left = time_left();
+    return $GLOBALS['vcm_stop'] || ($left !== null && $left < $needs);
+}
+
+/** A wait in seconds, shortened to fit the time left, but at least 1. */
+function fitting(int $seconds, float $margin = 3): int
+{
+    $left = time_left();
+    return $left === null ? $seconds : max(1, min($seconds, (int) floor($left - $margin)));
+}
+
 function stop_dependents(string $volume, array $dependents): array
 {
     $results = [];
@@ -845,7 +891,13 @@ function stop_dependents(string $volume, array $dependents): array
         if (!container_running($container)) {
             continue;
         }
-        $grace = $dependent['grace'];
+        if (out_of_time()) {
+            $results[] = ['container' => $container, 'result' => 'failed',
+                          'message' => "Dependent \"$container\" was left running: no time was left."];
+            log_event("dependent \"$container\" of \"$volume\" was left to Unraid: no time was left", true);
+            continue;
+        }
+        $grace = fitting($dependent['grace']);
         $begin = microtime(true);
         run([program('docker'), 'stop', '-t', (string) $grace, $container], $grace + 30);
         $took = microtime(true) - $begin;
@@ -1146,7 +1198,9 @@ function network_open(string $file): ?string
  */
 function take_lock()
 {
-    $handle = @fopen(LOCK_FILE, 'c');
+    // 'e': programs this one starts do not inherit the lock, so a helper left
+    // running after this program was ended cannot keep it (audit S2).
+    $handle = @fopen(LOCK_FILE, 'ce');
     if ($handle === false) {
         throw new Fail('Could not create the lock file ' . LOCK_FILE . '.', CODE_USAGE);
     }
@@ -1498,7 +1552,15 @@ function command_mount(array $args, array $options, bool $json): int
                 CODE_REFUSED => 'refused by a safety check',
                 CODE_FILESYSTEM => 'filesystem could not be mounted',
             ];
-            log_event("mount of \"$name\" failed: " . ($reasons[$e->getCode()] ?? 'error'));
+            $reason = $reasons[$e->getCode()] ?? 'error';
+            // A cancel (also by the array-stop hooks) and the time limit are no
+            // wrong password; say what happened.
+            if (str_starts_with($e->getMessage(), 'Unlocking was cancelled')) {
+                $reason = 'cancelled';
+            } elseif (str_starts_with($e->getMessage(), 'Unlocking took too long')) {
+                $reason = 'unlocking took too long';
+            }
+            log_event("mount of \"$name\" failed: $reason");
         }
         throw $e;
     }
@@ -1731,7 +1793,8 @@ function end_programs(array $holders): array
         return $labels;
     }
     run(array_merge([program('kill'), '-TERM'], $pids), TOOL_TIMEOUT);
-    for ($i = 0; $i < FORCE_WAIT * 2 && $alive($pids) !== []; $i++) {
+    $wait = fitting(FORCE_WAIT, 5);
+    for ($i = 0; $i < $wait * 2 && $alive($pids) !== []; $i++) {
         usleep(500000);
     }
     $left = $alive($pids);
@@ -1824,7 +1887,8 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
         $users = mount_users($device_number);
         if ($force && $users['containers'] !== []) {
             foreach (array_keys($users['containers']) as $id) {
-                run([program('docker'), 'stop', '-t', (string) FORCE_WAIT, (string) $id], FORCE_WAIT + 30);
+                $wait = fitting(FORCE_WAIT, 5);
+                run([program('docker'), 'stop', '-t', (string) $wait, (string) $id], $wait + 30);
             }
             $stopped = implode(', ', array_map(fn($c) => "\"$c\"", $users['containers']));
             $notes[] = "Forced: stopped $stopped.";
@@ -1871,6 +1935,14 @@ function dismount_all(bool $json, bool $force): int
     $failed = false;
     foreach (live_volumes() as $name => $live) {
         $name = (string) $name;
+        if (out_of_time(5)) {
+            // Not started: half a dismount would be worse than none.
+            $failed = true;
+            $results[] = ['name' => $name, 'ok' => false, 'code' => CODE_BUSY,
+                          'error' => "\"$name\" was left mounted: no time was left.", 'details' => null];
+            log_event("dismount of \"$name\" was not started: no time was left", isset($config[$name]));
+            continue;
+        }
         try {
             $notes = do_dismount($name, $config[$name] ?? null, $live, $force);
             $results[] = [
@@ -1924,6 +1996,7 @@ function command_dismount(array $args, array $options, bool $json): int
         // --array-stop is given by the unmounting_disks hook. Force is then on
         // unless the setting "force_at_array_stop" turns it off (LIFE-10).
         $force = $options['force'] || ($options['array_stop'] && setting('force_at_array_stop', SETTINGS['force_at_array_stop']));
+        watch_time($options);
         return dismount_all($json, $force);
     }
     if (count($args) !== 1) {
@@ -1958,9 +2031,15 @@ function command_dismount(array $args, array $options, bool $json): int
 function command_stop_dependents(array $args, array $options, bool $json): int
 {
     if (!$options['all'] || $args !== []) {
-        throw new Fail('Usage: vcmount stop-dependents --all', CODE_USAGE);
+        throw new Fail('Usage: vcmount stop-dependents --all [--within <seconds>]', CODE_USAGE);
     }
-    $config = load_config();
+    watch_time($options);
+    // A fault in the configuration must not stop this either (audit B15).
+    try {
+        $config = load_config();
+    } catch (Fail $e) {
+        $config = [];
+    }
     $lock = take_lock();
     $live = live_volumes();
     $results = [];
@@ -2100,6 +2179,14 @@ function command_repair_shares(array $args, bool $json): int
  * The choices the web forms offer: the Unraid users (for a share) and the
  * Docker containers (for dependents). Changes nothing.
  */
+/** Unraid's shutdown time-out in seconds (Settings › Disk Settings), 90 if unknown. */
+function shutdown_timeout(): int
+{
+    $ini = @parse_ini_file('/var/local/emhttp/var.ini');
+    $value = is_array($ini) ? (string) ($ini['shutdownTimeout'] ?? '') : '';
+    return preg_match('/\A[0-9]{1,5}\z/', $value) ? (int) $value : 90;
+}
+
 function command_options(array $args, bool $json): int
 {
     if ($args !== []) {
@@ -2131,7 +2218,8 @@ function command_options(array $args, bool $json): int
     }
 
     if ($json) {
-        echo json_encode(['ok' => true, 'users' => $users, 'containers' => $containers, 'notes' => $notes],
+        echo json_encode(['ok' => true, 'users' => $users, 'containers' => $containers, 'notes' => $notes,
+                          'shutdown_timeout' => shutdown_timeout()],
             JSON_UNESCAPED_SLASHES), "\n";
         return CODE_OK;
     }
@@ -2772,11 +2860,11 @@ function parse_args(array $args): array
         '--force' => 'force', '--array-stop' => 'array_stop', '--over-http' => 'over_http',
         '--pim' => 'pim', '--hidden' => 'hidden',
     ];
-    $values = ['--file' => 'file', '--name' => 'name', '--revision' => 'revision'];
+    $values = ['--file' => 'file', '--name' => 'name', '--revision' => 'revision', '--within' => 'within'];
     $options = [
         'json' => false, 'read_only' => false, 'all' => false, 'force' => false, 'array_stop' => false,
         'over_http' => false, 'pim' => false, 'hidden' => false, 'file' => null, 'name' => null,
-        'revision' => null, 'keyfile' => [],
+        'revision' => null, 'keyfile' => [], 'within' => null,
     ];
     $plain = [];
     while ($args !== []) {

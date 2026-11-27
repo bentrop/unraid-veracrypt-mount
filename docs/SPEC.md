@@ -208,8 +208,10 @@ Nothing needs to be installed on the server.
   order confirmed on 7.4 (test 8). The plugin hooks `stopping_docker` (stop dependents
   while Docker still runs) and `unmounting_disks` (dismount all before the disks
   unmount); array stop, reboot and the power-cycle recovery were tested with them.
-- **LIFE-3 (Agreed)** Warn if the sum of grace periods exceeds Unraid's shutdown
-  timeout, because Unraid forces the shutdown after that.
+- **LIFE-3 (Agreed, built 2026-11-27)** Warn if the sum of grace periods exceeds Unraid's
+  shutdown timeout, because Unraid forces the shutdown after that. The edit panel warns
+  when a volume's dependents need more than half of it, the share the `stopping_docker`
+  hook has; the engine then shortens the grace periods to fit (audit S2).
 - **LIFE-4 (Agreed 2026-11-17)** If the Docker service is stopped or restarted, dependents
   follow the same rules as above. Unraid fires `stopping_docker` and `docker_started`
   also when Docker is switched off and on in Settings › Docker (test in section 10).
@@ -747,6 +749,21 @@ call `include/actions.php` the way the web page will, without a browser.
   which `php -l` does not catch; fixed.) Ctrl+C in Unraid's web terminal during
   `vcmount mount --file ... --pim --keyfile ...`: "Unlocking was cancelled". Afterwards
   no cryptsetup was left on Bob. Passed. A search of `/var/log` and `/tmp` for 739184 found it nowhere.
+- Array stop and shutdown (audit S2, 2026-11-27, version 2026.11.27f installed from a
+  local build, Unraid 7.4.1, shutdown time-out 120 s; all saved volumes throwaways):
+  - During a slow unlock the engine held the lock file and cryptsetup did not (lock
+    opened with close-on-exec). Passed.
+  - `vcmount stop-dependents --all --within 5` stopped `vcm-test-a` and `vcm-test-b` in
+    a second (code 0); with `--within 2` it left both running, "no time was left"
+    (code 5), and a log line each. Passed.
+  - Array stop by the owner with `throwaway-exfat` (two dependents) and
+    `throwaway-400-xfs` mounted and a slow unlock (PIM 739184) running: the
+    `stopping_docker` hook found the engine busy, cancelled the unlock (02:30:57) and
+    stopped the dependents before Unraid stopped Docker (02:31:00); `unmounting_disks`
+    dismounted both volumes (02:31:27) before Unraid unmounted the disks (02:31:31).
+    The whole stop took about 75 s, mostly VMs (about 40 s) and containers (about
+    20 s); the plugin added about 7 s. Passed. (The cancelled unlock was logged as
+    "could not unlock"; it is now logged as "cancelled".)
 
 **Engine tests (2026-11-15, all passed, on `throwaway-ntfs`, run with
 `scripts/enginetest.sh`).**

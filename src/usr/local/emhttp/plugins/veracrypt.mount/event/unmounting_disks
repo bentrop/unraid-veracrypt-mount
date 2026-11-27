@@ -40,20 +40,33 @@ budget=$((shutdown_timeout / 4))
 
 SECONDS=0   # bash counts the seconds since this line by itself
 code=0
+cancelled=no
 while :; do
     left=$((budget - SECONDS))
     [ "$left" -gt 0 ] || break
-    timeout "$left" "$VCMOUNT" dismount --all --array-stop < /dev/null > /dev/null 2>&1
+    [ "$left" -le 9999 ] || left=9999
+    # The engine fits its work into the time left (--within). Should it still
+    # run over, the stop signal lets it finish the volume it is working on;
+    # 15 seconds later it is ended for good (audit S2).
+    timeout -k 15 "$left" "$VCMOUNT" dismount --all --array-stop --within "$left" < /dev/null > /dev/null 2>&1
     code=$?
-    # Code 6: another vcmount action is still running. Wait and try again.
+    # Code 6: another vcmount action is still running. If it is an unlock,
+    # cancel it first (UI-8): it must not hold up the array stop (audit S2).
     [ "$code" -eq 6 ] || break
-    sleep "$WAIT"
+    if [ "$cancelled" = no ]; then
+        "$VCMOUNT" cancel-unlock < /dev/null > /dev/null 2>&1
+        cancelled=yes
+        sleep 2
+    else
+        sleep "$WAIT"
+    fi
 done
 
 case "$code" in
     0) ;;
     5) say "not every volume could be dismounted" ;;
     6) say "another vcmount action was still running; volumes were not dismounted" ;;
+    137) say "vcmount had to be ended after its time ran out" ;;
     124) say "dismounting took longer than $budget seconds and was stopped" ;;
     *) say "vcmount ended with code $code" ;;
 esac

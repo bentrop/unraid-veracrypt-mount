@@ -879,4 +879,11 @@ C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be docum
     the unmount is retried for up to two seconds before the volume counts as busy.
     Tested by the owner: a volume whose share was open in Windows Explorer dismounted
     without "still in use".
+  - S2 (built and tested on Bob with an array stop, see SPEC section 10): the hooks cancel a running unlock when
+    they find the engine busy; they pass the time they have (`--within`), and the
+    engine fits grace periods and the wait before ending programs into it, leaving to
+    Unraid what no longer fits; a stop signal lets the engine finish the volume it is
+    working on, and the hooks end it for good 15 seconds later; the lock file is not
+    inherited by programs the engine starts. LIFE-3: the edit panel warns when a
+    volume's dependents need more time than half the shutdown time-out.
 

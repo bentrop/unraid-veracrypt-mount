@@ -136,6 +136,7 @@ $vcm = '/plugins/veracrypt.mount';
       <p class="vcm-note">Containers that run only while this volume is mounted. Started top to bottom,
          stopped bottom to top. Drag to reorder.</p>
       <ul id="e-deps" class="vcm-deps"></ul>
+      <p class="vcm-warning" id="e-deps-time" hidden></p>
       <div class="vcm-buttons">
         <select id="e-dep-choice"></select>
         <input type="button" id="e-dep-add" value="Add dependent">

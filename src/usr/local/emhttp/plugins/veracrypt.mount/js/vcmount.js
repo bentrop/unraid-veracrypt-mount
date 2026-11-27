@@ -1118,7 +1118,23 @@
             : '<option value="">(no other containers)</option>');
     }
 
+    /**
+     * LIFE-3: at shutdown the dependents of all volumes get half of Unraid's
+     * shutdown time-out. Warn when this volume's dependents alone need more.
+     */
+    function depsTime() {
+        var total = 0;
+        $('#e-deps .e-grace').each(function () { total += parseInt($(this).val(), 10) || 0; });
+        var budget = Math.max(20, Math.floor(((options && options.shutdown_timeout) || 90) / 2));
+        $('#e-deps-time').prop('hidden', total <= budget).text(
+            'Together these dependents may need ' + total + ' seconds to stop, but at shutdown or reboot '
+            + 'there are only ' + budget + ' (half of Unraid\'s shutdown time-out, Settings › Disk Settings). '
+            + 'The grace periods are then shortened to fit, and what still runs is stopped by Unraid with its '
+            + 'own short limit. Shorten the grace periods, or raise the time-out.');
+    }
+
     function updateSummaries() {
+        depsTime();
         var share = 'not shared';
         if ($('#e-share').val() === 'yes') {
             var users = $('.e-access').filter(function () { return $(this).val() !== 'none'; }).map(function () {
