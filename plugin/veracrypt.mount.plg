@@ -2,8 +2,8 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "veracrypt.mount">
 <!ENTITY author    "bentrop">
-<!ENTITY version   "2026.11.27o">
-<!ENTITY sha256    "4d0f409b64c5e5af7677ebdfa5002cd706687d5870c90a7c07fd211883b6bbf1">
+<!ENTITY version   "2026.11.27p">
+<!ENTITY sha256    "efbc5027183c377404dbcad0cffb4837876bbbb784284d83ad2b263fe8b90970">
 <!ENTITY launch    "Settings/VeraCryptMount">
 <!ENTITY gitURL    "https://github.com/bentrop/unraid-veracrypt-mount">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/&name;.plg">
@@ -41,15 +41,16 @@ true
 <SHA256>&sha256;</SHA256>
 </FILE>
 
-<!-- The idle lock (LIFE-8): a check once a minute. Unraid's update_cron
-     collects the *.cron files of installed plugins from their folder on the
-     flash drive into the system's job list, as for its own plugins. The check
-     does nothing unless a volume has "Lock when idle" ticked. -->
+<!-- The minute check (DOC-6, LIFE-8): stops dependents started while their
+     volume is locked, and locks idle volumes. Unraid's update_cron collects
+     the *.cron files of installed plugins from their folder on the flash drive
+     into the system's job list, as for its own plugins. -->
 <FILE Run="/bin/bash">
 <INLINE>
 # The plugin manager never overwrites an existing file, so a changed line
-# would not arrive with an update. Remove the old one first.
-rm -f &flash;/&name;.cron
+# would not arrive with an update. Only remove the old file if its command
+# differs, so normal reboots do not rewrite the flash drive (audit S2).
+grep -qF '/usr/local/emhttp/plugins/&name;/scripts/vcmount check ' &flash;/&name;.cron 2&gt;/dev/null || rm -f &flash;/&name;.cron
 </INLINE>
 </FILE>
 
@@ -67,8 +68,8 @@ rm -f &flash;/&name;.cron
 <FILE Run="/bin/bash">
 <INLINE>
 /usr/local/sbin/update_cron
-if ! grep -qF 'vcmount check' /etc/cron.d/root 2&gt;/dev/null; then
-  { cat /etc/cron.d/root 2&gt;/dev/null; cat &flash;/&name;.cron; } | crontab -c /etc/cron.d -
+if ! grep -qF '/usr/local/emhttp/plugins/&name;/scripts/vcmount check ' /etc/cron.d/root 2&gt;/dev/null; then
+  { grep -vF '/usr/local/emhttp/plugins/&name;/scripts/vcmount idle-check' /etc/cron.d/root 2&gt;/dev/null; echo ""; cat &flash;/&name;.cron; } | crontab -c /etc/cron.d -
 fi
 </INLINE>
 </FILE>
@@ -98,17 +99,27 @@ echo ""
 <FILE Run="/bin/bash" Method="remove">
 <INLINE>
 if [ -x /usr/local/emhttp/plugins/&name;/scripts/vcmount ]; then
-  if ! /usr/local/emhttp/plugins/&name;/scripts/vcmount dismount --all; then
+  code=0
+  for _ in 1 2 3; do
+    /usr/local/emhttp/plugins/&name;/scripts/vcmount dismount --all
+    code=$?
+    [ "$code" -ne 6 ] &amp;&amp; break
+    sleep 2
+  done
+  if [ "$code" -eq 6 ]; then
+    echo "Not removed: another vcmount action is still running. Wait a moment and remove the plugin again."
+    exit 1
+  elif [ "$code" -ne 0 ]; then
     echo "Not removed: a volume is still mounted and in use. Dismount it, then remove the plugin again."
     exit 1
   fi
 fi
+rm -f &flash;/&name;.cron
+/usr/local/sbin/update_cron
 removepkg &name;
 rmdir /etc/samba/veracrypt-shares 2&gt;/dev/null
 rm -f &flash;/&name;-*.txz
-rm -f &flash;/&name;.cron
-/usr/local/sbin/update_cron
-rm -f /var/run/vcmount.idle /var/run/vcmount.idle-error
+rm -f /var/run/vcmount.lock /var/run/vcmount.cancel /var/run/vcmount.unlocking /var/run/vcmount.idle /var/run/vcmount.idle-error /var/run/vcmount.stray
 echo ""
 echo "-----------------------------------------------------------"
 echo " VeraCrypt Mount has been removed."
