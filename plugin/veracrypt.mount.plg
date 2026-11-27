@@ -2,8 +2,8 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "veracrypt.mount">
 <!ENTITY author    "bentrop">
-<!ENTITY version   "2026.11.27i">
-<!ENTITY sha256    "fa4b4f05cf4d9cd383acc6d74f67eefa9c16a798fabd730896391306ef83099d">
+<!ENTITY version   "2026.11.27l">
+<!ENTITY sha256    "fed5e4be3f548f4aad6d6046c3238d60bd0821019c787a84c1e0516b7be084b5">
 <!ENTITY launch    "Settings/VeraCryptMount">
 <!ENTITY gitURL    "https://github.com/bentrop/unraid-veracrypt-mount">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/&name;.plg">
@@ -41,6 +41,30 @@ true
 <SHA256>&sha256;</SHA256>
 </FILE>
 
+<!-- The idle lock (LIFE-8): a check once a minute. Unraid's update_cron
+     collects the *.cron files of installed plugins from their folder on the
+     flash drive into the system's job list, as for its own plugins. The check
+     does nothing unless a volume has "Lock when idle" ticked. -->
+<FILE Name="&flash;/&name;.cron">
+<INLINE>
+# VeraCrypt Mount: lock volumes that were idle for their set time
+* * * * * /usr/local/emhttp/plugins/&name;/scripts/vcmount idle-check &gt;/dev/null 2&gt;&amp;1
+</INLINE>
+</FILE>
+
+<!-- update_cron takes only plugins already listed in /var/log/plugins, and
+     the plugin manager lists this one only after these steps, on a fresh
+     install and at boot. So if the line is still missing, add it as
+     update_cron does; its next run includes the file anyway. -->
+<FILE Run="/bin/bash">
+<INLINE>
+/usr/local/sbin/update_cron
+if ! grep -qF 'vcmount idle-check' /etc/cron.d/root 2&gt;/dev/null; then
+  { cat /etc/cron.d/root 2&gt;/dev/null; cat &flash;/&name;.cron; } | crontab -c /etc/cron.d -
+fi
+</INLINE>
+</FILE>
+
 <!-- Only now, after the new package was downloaded, checked and installed,
      remove packages of other versions from the flash drive (audit S8). If the
      download or the check fails, the plugin manager stops before this step
@@ -74,6 +98,9 @@ fi
 removepkg &name;
 rmdir /etc/samba/veracrypt-shares 2&gt;/dev/null
 rm -f &flash;/&name;-*.txz
+rm -f &flash;/&name;.cron
+/usr/local/sbin/update_cron
+rm -f /var/run/vcmount.idle /var/run/vcmount.idle-error
 echo ""
 echo "-----------------------------------------------------------"
 echo " VeraCrypt Mount has been removed."
