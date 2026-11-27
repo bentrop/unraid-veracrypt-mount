@@ -1045,7 +1045,15 @@ function add_share(string $name, array $share, string $point, bool $read_only): 
         throw $e;
     }
     if (!samba_reload()) {
-        throw new Fail("The share of \"$name\" was written, but Samba did not take it up (smbcontrol failed).", CODE_SHARE);
+        // Take the share back out, so the page does not show it as on and the
+        // next Samba reload does not open it unasked (audit B4).
+        @unlink($file);
+        try {
+            hook_remove($name);
+        } catch (Fail $e) {
+            // Reported below in the same message.
+        }
+        throw new Fail("No share for \"$name\": Samba did not take it up (smbcontrol failed), so it was removed again.", CODE_SHARE);
     }
 }
 
@@ -1608,9 +1616,10 @@ function mount_users(string $device_number): array
         if (!$uses) {
             continue;
         }
-        // A program inside a container carries the container's ID in its cgroup.
-        if (preg_match('/[0-9a-f]{64}/', (string) @file_get_contents("$dir/cgroup"), $m)) {
-            $ids[$m[0]] = true;
+        // A program inside a container carries the container's ID in its cgroup,
+        // after "docker-" or "docker/" (audit S5: not just any long hex string).
+        if (preg_match('#docker[-/]([0-9a-f]{64})#', (string) @file_get_contents("$dir/cgroup"), $m)) {
+            $ids[$m[1]] = true;
         } else {
             $programs[] = program_label($dir);
         }
@@ -1640,6 +1649,24 @@ function own_ancestors(): array
 }
 
 /**
+ * When a running process started (field 22 of /proc/<pid>/stat), or null if
+ * there is no such process or it has finished (a zombie).
+ */
+function process_start(string $pid): ?string
+{
+    $stat = @file_get_contents("/proc/$pid/stat");
+    if ($stat === false) {
+        return null;
+    }
+    // The program name in brackets may contain spaces; the fields follow it.
+    $fields = explode(' ', substr($stat, strrpos($stat, ')') + 2));
+    if (count($fields) < 20 || $fields[0] === 'Z') {
+        return null;
+    }
+    return $fields[19];
+}
+
+/**
  * Forced dismount only: end the programs that hold a volume open. Each gets
  * the stop signal and FORCE_WAIT seconds; what is left is killed.
  * $holders comes from holders(). Returns the labels of the programs ended.
@@ -1665,11 +1692,23 @@ function end_programs(array $holders): array
         return [];
     }
 
-    $alive = function (array $pids): array {
-        return array_values(array_filter($pids, function (string $pid): bool {
-            return is_dir("/proc/$pid");
+    // A process is still "the same one" only while its start time is unchanged:
+    // a number freed and handed to a new program must never be killed, and a
+    // finished process waiting to be collected (a zombie) is not waited for
+    // (audit S5).
+    $started = [];
+    foreach ($pids as $pid) {
+        $started[$pid] = process_start($pid);
+    }
+    $alive = function (array $pids) use ($started): array {
+        return array_values(array_filter($pids, function (string $pid) use ($started): bool {
+            return $started[$pid] !== null && process_start($pid) === $started[$pid];
         }));
     };
+    $pids = $alive($pids);
+    if ($pids === []) {
+        return $labels;
+    }
     run(array_merge([program('kill'), '-TERM'], $pids), TOOL_TIMEOUT);
     for ($i = 0; $i < FORCE_WAIT * 2 && $alive($pids) !== []; $i++) {
         usleep(500000);

@@ -2,8 +2,8 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "veracrypt.mount">
 <!ENTITY author    "bentrop">
-<!ENTITY version   "2026.11.27b">
-<!ENTITY sha256    "3edb0ccef5c43933adf96d3bfb29020150ed60d01f9428f644e7ec9471ad53d5">
+<!ENTITY version   "2026.11.27c">
+<!ENTITY sha256    "fa94e846ffbab8d884c48fd1b50699feca63506bf63fa08d1791f72e94b7383c">
 <!ENTITY launch    "Settings/VeraCryptMount">
 <!ENTITY gitURL    "https://github.com/bentrop/unraid-veracrypt-mount">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/&name;.plg">
@@ -27,13 +27,9 @@ removepkg, so every file it brings is also taken away again.
 - See the commit history on GitHub.
 </CHANGES>
 
-<!-- Before installing: remove packages of other versions from the flash drive. -->
 <FILE Run="/bin/bash">
 <INLINE>
 mkdir -p &flash;
-for old in &flash;/&name;-*.txz; do
-  [ -e "$old" ] &amp;&amp; [ "$(basename "$old")" != "&package;" ] &amp;&amp; rm -f "$old"
-done
 true
 </INLINE>
 </FILE>
@@ -45,8 +41,15 @@ true
 <SHA256>&sha256;</SHA256>
 </FILE>
 
+<!-- Only now, after the new package was downloaded, checked and installed,
+     remove packages of other versions from the flash drive (audit S8). If the
+     download or the check fails, the plugin manager stops before this step
+     and the old package stays. -->
 <FILE Run="/bin/bash">
 <INLINE>
+for old in &flash;/&name;-*.txz; do
+  [ -e "$old" ] &amp;&amp; [ "$(basename "$old")" != "&package;" ] &amp;&amp; rm -f "$old"
+done
 echo ""
 echo "-----------------------------------------------------------"
 echo " VeraCrypt Mount &version; is installed."

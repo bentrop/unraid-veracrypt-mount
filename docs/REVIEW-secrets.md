@@ -858,4 +858,13 @@ C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be docum
   - B1, B2, B3, B13 (parts), B15 (1, 2, 4): see the report.
 - **Open:** S2, S5, S8 and B4, B5, B7 need a plan and tests on Bob; the rest is listed
   in the report for later.
+- **Fixed in the second batch (2026-11-27):**
+  - S8: the `.plg` removes packages of other versions only after the new one was
+    downloaded, checked against its SHA256 and installed.
+  - B4: if Samba does not take up a new share, its file and include line are removed
+    again, so the page does not show it as on and a later reload does not open it.
+  - S5 (parts 3 and 4): a forced dismount notes each process's start time and signals
+    only processes that still have it, so a reused process number is never hit and
+    finished processes are not waited for; containers are recognised by
+    `docker/<ID>` or `docker-<ID>` in their cgroup (on Bob: `0::/docker/<ID>`).
 
