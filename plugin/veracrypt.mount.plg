@@ -2,8 +2,8 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "veracrypt.mount">
 <!ENTITY author    "bentrop">
-<!ENTITY version   "2026.11.27p">
-<!ENTITY sha256    "efbc5027183c377404dbcad0cffb4837876bbbb784284d83ad2b263fe8b90970">
+<!ENTITY version   "2026.11.27q">
+<!ENTITY sha256    "8160848e4d45f1a39283ecaa1542255cb032eccd390da0781e12e2e3f375f28f">
 <!ENTITY launch    "Settings/VeraCryptMount">
 <!ENTITY gitURL    "https://github.com/bentrop/unraid-veracrypt-mount">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/&name;.plg">
@@ -83,6 +83,8 @@ fi
 for old in &flash;/&name;-*.txz; do
   [ -e "$old" ] &amp;&amp; [ "$(basename "$old")" != "&package;" ] &amp;&amp; rm -f "$old"
 done
+# Status files of older versions, now in /var/run/vcmount/ (audit S12).
+rm -f /var/run/vcmount.lock /var/run/vcmount.cancel /var/run/vcmount.unlocking /var/run/vcmount.idle /var/run/vcmount.idle-error /var/run/vcmount.stray
 echo ""
 echo "-----------------------------------------------------------"
 echo " VeraCrypt Mount &version; is installed."
@@ -119,6 +121,9 @@ rm -f &flash;/&name;.cron
 removepkg &name;
 rmdir /etc/samba/veracrypt-shares 2&gt;/dev/null
 rm -f &flash;/&name;-*.txz
+if [ -d /var/run/vcmount ] &amp;&amp; [ ! -L /var/run/vcmount ]; then
+  rm -rf /var/run/vcmount
+fi
 rm -f /var/run/vcmount.lock /var/run/vcmount.cancel /var/run/vcmount.unlocking /var/run/vcmount.idle /var/run/vcmount.idle-error /var/run/vcmount.stray
 echo ""
 echo "-----------------------------------------------------------"
