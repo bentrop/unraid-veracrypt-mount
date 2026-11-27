@@ -1833,7 +1833,13 @@ function xfs_duplicate_in_dmesg(?string $dm, string $uuid): bool
         return false;
     }
     try {
-        $r = run([program('dmesg')], TOOL_TIMEOUT);
+        // Only the warnings of the last two minutes, not the whole kernel log
+        // (audit 2026-11-27c B7); XFS reports the duplicate as a warning. A
+        // dmesg without these options gets asked plainly.
+        $r = run([program('dmesg'), '--level=alert,crit,err,warn', '--since', '-2min'], TOOL_TIMEOUT);
+        if ($r['code'] !== 0) {
+            $r = run([program('dmesg')], TOOL_TIMEOUT);
+        }
     } catch (Fail $e) {
         return false;
     }
