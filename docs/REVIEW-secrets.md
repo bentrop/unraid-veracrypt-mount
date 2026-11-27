@@ -1047,8 +1047,9 @@ containers.
   batch 1 and 2). New beyond the audit, from the owner's test: a normal dismount with
   a file open over the network is refused before anything changes; force is one dialog
   with Cancel focused.
-- **Not fixed:** S1.4 (sharing the stop time fairly across volumes; S1.2 and S1.3
-  remove most of the risk), and a few cosmetic items noted in the audit as harmless.
+- **S1.4 (fixed afterwards):** a forced dismount of all volumes works in two rounds,
+  so several busy volumes share one wait (DESIGN-engine section 9a); tested with three.
+- **Not fixed:** a few cosmetic items noted in the audit as harmless.
 - **Not tested on Bob:** keyfile-only volume with a PIM (no such test volume);
   container mount propagation for volumes inside a share (S3.2 is a warning only);
   removal refusing while mounted (needs the full install, phase 2).

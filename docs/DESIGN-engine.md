@@ -234,6 +234,14 @@ running (code 6), it calls `vcmount cancel-unlock --array-stop` on every retry: 
 cancels a running unlock and writes the time to `/var/run/vcmount/stop`. The minute
 check and the dependents' start delays look at it every second and give way, so they
 cannot hold the lock through an array stop (audit 2026-11-27c S1).
+A forced `dismount --all` works in two rounds (S1.4): first every volume without
+force, so the free ones are done at once; then one look through all processes finds
+what holds the volumes still in use, their programs get the stop signal together with
+one shared wait, their containers one `docker stop`, and only then is each of them
+dismounted with force. Three busy volumes take about as long as one: in the test
+(`scripts/forcealltest.sh`, programs that ignore the stop signal, 22 seconds) all
+three were locked after 18 seconds, where the one-by-one way left the third mounted.
+`VCMOUNT_TRACE=1` prints the timing of each step on standard error.
 
 **Notifications (LIFE-9).** Faults go to Unraid's notifications as well as the system
 log, with the same text: a dependent that could not be started or stopped or was

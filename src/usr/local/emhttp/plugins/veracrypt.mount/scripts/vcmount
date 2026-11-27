@@ -988,6 +988,7 @@ function start_dependents(string $volume, array $dependents): array
 $GLOBALS['vcm_deadline'] = null;   // microtime() by which to be done, or null
 $GLOBALS['vcm_stop'] = false;      // a stop signal arrived
 $GLOBALS['vcm_started'] = time();  // when this run began
+$GLOBALS['vcm_t0'] = microtime(true);
 
 /**
  * Should a long action give way: a stop signal, or a stop of the array or of
@@ -1001,6 +1002,14 @@ function stop_requested(): bool
     $asked = read_marker(STOP_FILE);
     return $asked !== null && preg_match('/\A[0-9]+\z/', trim($asked)) === 1
         && (int) trim($asked) >= $GLOBALS['vcm_started'];
+}
+
+/** For timing tests only: with VCMOUNT_TRACE=1, note a step on standard error. */
+function trace(string $step): void
+{
+    if (getenv('VCMOUNT_TRACE') === '1') {
+        fwrite(STDERR, sprintf("[%5.1f s] %s\n", microtime(true) - $GLOBALS['vcm_t0'], $step));
+    }
 }
 
 /** Wait, one second at a time; false if a stop was asked for meanwhile. */
@@ -2040,35 +2049,56 @@ function quoted_list(array $names): string
  */
 function holders(string $point): array
 {
-    $found = [];
+    return holders_of([$point])[$point];
+}
+
+/**
+ * holders() for several folders with one look through all processes, which
+ * takes a second or two on a busy server (audit 2026-11-27c S1.4). Returns
+ * folder => holders.
+ */
+function holders_of(array $points): array
+{
+    $found = array_fill_keys($points, []);
     $dirs = glob('/proc/[0-9]*', GLOB_ONLYDIR);
     foreach ($dirs === false ? [] : $dirs as $dir) {
         $fds = glob("$dir/fd/*");
         // Also the program file itself (exe): a program started from the
         // volume holds it even with no file open (audit B7).
         $links = array_merge(["$dir/cwd", "$dir/root", "$dir/exe"], $fds === false ? [] : $fds);
-        $holds = false;
+        $held = [];
         foreach ($links as $link) {
             $target = @readlink($link);
-            if ($target !== false && below($target, $point)) {
-                $holds = true;
-                break;
+            if ($target === false) {
+                continue;
+            }
+            foreach ($points as $point) {
+                if (below($target, $point)) {
+                    $held[$point] = true;
+                }
             }
         }
         // And files mapped into memory (databases, libraries), which stay in
         // use after the program closed them (audit B7).
-        if (!$holds) {
+        if (count($held) < count($points)) {
             $maps = @file("$dir/maps", FILE_IGNORE_NEW_LINES);
             foreach ($maps === false ? [] : $maps as $line) {
                 $slash = strpos($line, '/');
-                if ($slash !== false && below(substr($line, $slash), $point)) {
-                    $holds = true;
-                    break;
+                if ($slash === false) {
+                    continue;
+                }
+                foreach ($points as $point) {
+                    if (!isset($held[$point]) && below(substr($line, $slash), $point)) {
+                        $held[$point] = true;
+                    }
                 }
             }
         }
-        if ($holds) {
-            $found[] = ['pid' => (int) basename($dir), 'label' => program_label($dir)];
+        if ($held !== []) {
+            $label = program_label($dir);
+            foreach (array_keys($held) as $point) {
+                $found[$point][] = ['pid' => (int) basename($dir), 'label' => $label];
+            }
         }
     }
     return $found;
@@ -2276,8 +2306,11 @@ function end_programs(array $holders): array
  * again. Without it a busy volume stays mounted. Never "lazy" either way.
  * Returns notes on what else happened, for example a dependent that was killed.
  */
-function do_dismount(string $name, ?array $volume, ?array $live, bool $force): array
+function do_dismount(string $name, ?array $volume, ?array $live, bool $force, bool $first_pass = false): array
 {
+    // $first_pass: the first, unforced round of a forced "dismount all"
+    // (audit 2026-11-27c S1.4). A volume still in use is then neither logged
+    // nor given back its share and dependents: the forced round follows.
     $saved = $volume !== null;
     $mapper = MAPPER_PREFIX . $name;
     $dm = dm_name(MAPPER_DIR . '/' . $mapper);
@@ -2287,7 +2320,7 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
     // use, as for VeraCrypt on Windows: without force nothing is changed, not
     // even the share, whose removal would drop that file (owner's test,
     // 2026-11-27). Samba's mere looks into folders do not count.
-    if (!$force && ($live['mounted_at'] ?? null) !== null) {
+    if (!$force && !$first_pass && ($live['mounted_at'] ?? null) !== null) {
         $point = $live['mounted_at'];
         $remote = [];
         foreach (holders($point) as $holder) {
@@ -2304,7 +2337,7 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
             );
             $fail->details = ['programs' => array_map(fn($l) => "$l, a file open over the network", $remote),
                               'restored' => ''];
-            if ($saved) {
+            if ($saved && !$first_pass) {
                 log_event("dismount of \"$name\" aborted: a file is open over the network", true);
             }
             throw $fail;
@@ -2330,7 +2363,7 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
         // Closing the share only asks Samba to let go; its workers may need a
         // moment. Try again for up to two seconds before calling it busy
         // (audit B7), but only if a share was closed.
-        for ($try = 0; $share_closed && $r['code'] !== 0 && $try < 4; $try++) {
+        for ($try = 0; $share_closed && !$first_pass && $r['code'] !== 0 && $try < 4; $try++) {
             usleep(500000);
             $r = run([program('umount'), $point], TOOL_TIMEOUT);
         }
@@ -2367,7 +2400,7 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
             // back its share and dependents (audit 2026-11-27c B2), except while
             // the array or Docker is being stopped.
             $back = '';
-            if (!$force && $saved && !stop_requested() && array_started()) {
+            if (!$force && !$first_pass && $saved && !stop_requested() && array_started()) {
                 $back = restore_after_busy($name, $volume, $point, !empty($live['read_only']));
             }
             $fail = new Fail(
@@ -2375,9 +2408,10 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
                 . ($force ? ", although force was used.\n" : "; nothing was forced.\n") . trim($r['err']) . $back,
                 CODE_BUSY
             );
-            $programs = array_column(holders($point), 'label');
+            // Not in the first round: the forced round looks anyway.
+            $programs = $first_pass ? [] : array_column(holders($point), 'label');
             $fail->details = ['programs' => $programs, 'restored' => trim($back)];
-            if ($saved) {
+            if ($saved && !$first_pass) {
                 // Program names and process numbers only, never file names.
                 log_event(
                     "dismount of \"$name\" aborted: still in use"
@@ -2424,6 +2458,93 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
 }
 
 /**
+ * The forced round of "dismount all" (S1.4): end the programs that hold any of
+ * these volumes open, all at once with one shared wait, stop the containers
+ * that hold them with one "docker stop", then dismount each volume with force
+ * (which deals with anything left). Returns one result per volume.
+ */
+function force_busy_volumes(array $names, array $config): array
+{
+    $live = live_volumes();
+    $outside = [];      // pid => holder, programs on the server
+    $containers = [];   // Docker ID => label
+    $ended = [];        // volume => labels of its programs
+    $stopped = [];      // volume => labels of its containers
+    $points = [];
+    foreach ($names as $name) {
+        if (($live[$name]['mounted_at'] ?? null) !== null) {
+            $points[$name] = $live[$name]['mounted_at'];
+        }
+    }
+    trace('forced round: looking for holders');
+    $all = $points === [] ? [] : holders_of(array_values($points));
+    trace('forced round: ending them');
+    foreach ($points as $name => $point) {
+        foreach ($all[$point] as $holder) {
+            $id = process_container_id('/proc/' . $holder['pid']);
+            if ($id === null) {
+                $outside[$holder['pid']] = $holder;
+                $ended[$name][] = $holder['label'];
+            } else {
+                $containers[$id] = $containers[$id] ?? container_label($id);
+                $stopped[$name][$id] = $containers[$id];
+            }
+        }
+    }
+    $refused = null;
+    if (!out_of_time(5)) {
+        try {
+            // Only what still runs is ended; labels of the others are dropped.
+            $gone = end_programs(array_values($outside));
+        } catch (Fail $e) {
+            $gone = [];
+            $refused = $e;   // started from inside a volume: nothing was ended
+        }
+        if ($containers !== [] && !out_of_time(5)) {
+            $wait = fitting(FORCE_WAIT, 5);
+            run(array_merge([program('docker'), 'stop', '-t', (string) $wait], array_keys($containers)), $wait + 30);
+        }
+    } else {
+        $gone = [];
+    }
+
+    $results = [];
+    foreach ($names as $name) {
+        $volume = $config[$name] ?? null;
+        $notes = [];
+        $mine = array_values(array_intersect($ended[$name] ?? [], $gone));
+        if ($mine !== []) {
+            $notes[] = 'Forced: ended ' . implode(', ', $mine) . '.';
+            if ($volume !== null) {
+                log_event("dismount of \"$name\" forced: ended " . quoted_list($mine), true);
+            }
+        }
+        if (($stopped[$name] ?? []) !== []) {
+            $notes[] = 'Forced: stopped ' . implode(', ', array_map(fn($c) => "\"$c\"", $stopped[$name])) . '.';
+            if ($volume !== null) {
+                log_event("dismount of \"$name\" forced: stopped " . implode(', ', array_map(fn($c) => "\"$c\"", $stopped[$name])), true);
+            }
+        }
+        try {
+            if ($refused !== null) {
+                throw $refused;
+            }
+            // What held it has ended, so this is quick.
+            if (out_of_time(2)) {
+                throw new Fail("\"$name\" was left mounted: no time was left.", CODE_BUSY);
+            }
+            trace("forced round: $name");
+            $notes = array_merge($notes, do_dismount($name, $volume, live_volumes()[$name] ?? null, true));
+            $results[$name] = ['name' => $name, 'ok' => true, 'message' => "Dismounted and locked \"$name\".", 'notes' => $notes];
+        } catch (Fail $e) {
+            $results[$name] = ['name' => $name, 'ok' => false, 'code' => $e->getCode(),
+                               'error' => $e->getMessage(), 'details' => $e->details];
+        }
+    }
+    return $results;
+}
+
+/**
  * After a dismount that stopped because the volume is in use: add its share
  * again and start its dependents again, as they were before (audit
  * 2026-11-27c B2). Returns a sentence for the message, or ''.
@@ -2447,9 +2568,16 @@ function restore_after_busy(string $name, array $volume, string $point, bool $re
 }
 
 /**
- * Dismount and lock every volume that is unlocked or mounted, one after the
- * other. Used by the array-stop hook. A volume that is still in use stays
- * mounted and the others are still dismounted; the result is then code 5.
+ * Dismount and lock every volume that is unlocked or mounted. Used by the
+ * array-stop hook. A volume that is still in use stays mounted and the others
+ * are still dismounted; the result is then code 5.
+ *
+ * With force, in two rounds (audit 2026-11-27c S1.4): first every volume
+ * without force, so the free ones are done at once; then the programs of all
+ * volumes still in use get the stop signal together and one shared wait, and
+ * their containers are stopped together, before those volumes are dismounted.
+ * So three busy volumes take about as long as one, and none is left out
+ * because an earlier one used up the time.
  */
 function dismount_all(bool $json, bool $force): int
 {
@@ -2463,6 +2591,7 @@ function dismount_all(bool $json, bool $force): int
     }
     $results = [];
     $failed = false;
+    $busy = [];
     foreach (live_volumes() as $name => $live) {
         $name = (string) $name;
         if (out_of_time(5)) {
@@ -2477,25 +2606,40 @@ function dismount_all(bool $json, bool $force): int
             }
             continue;
         }
+        trace("first round: $name");
         try {
-            $notes = do_dismount($name, $config[$name] ?? null, $live, $force);
-            $results[] = [
+            $notes = do_dismount($name, $config[$name] ?? null, $live, false, $force);
+            $results[$name] = [
                 'name' => $name,
                 'ok' => true,
                 'message' => "Dismounted and locked \"$name\".",
                 'notes' => $notes,
             ];
         } catch (Fail $e) {
-            $failed = true;
-            $results[] = [
+            $results[$name] = [
                 'name' => $name,
                 'ok' => false,
                 'code' => $e->getCode(),
                 'error' => $e->getMessage(),
                 'details' => $e->details,
             ];
+            if ($force && $e->getCode() === CODE_BUSY) {
+                $busy[] = $name;
+            } else {
+                $failed = true;
+            }
         }
     }
+    if ($busy !== []) {
+        $forced = force_busy_volumes($busy, $config);
+        foreach ($busy as $name) {
+            $results[$name] = $forced[$name];
+            if (!$forced[$name]['ok']) {
+                $failed = true;
+            }
+        }
+    }
+    $results = array_values($results);
     $code = $failed ? CODE_BUSY : CODE_OK;
 
     if ($json) {
