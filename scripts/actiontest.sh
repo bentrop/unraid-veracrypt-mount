@@ -37,7 +37,7 @@ case "$case" in
 esac
 
 remote="php $REMOTE_DIR/actiontest-on-bob.php $case"
-remote="$remote; echo \"[result code on Bob: \$?]\""
+remote="$remote; echo \"[result code on the server: \$?]\""
 
 echo "Server:  $HOST"
 echo "Command: $remote"

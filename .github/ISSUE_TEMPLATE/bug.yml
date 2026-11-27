@@ -1,0 +1,47 @@
+name: Bug report
+description: Something does not work as described.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never post a password, PIM, keyfile or the contents of a volume here.**
+        For a security problem, use "Report a vulnerability" on the Security tab instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Mount the volume ...\n2. ..."
+  - type: input
+    id: plugin
+    attributes:
+      label: Plugin version
+      description: Shown on Unraid's Plugins page.
+    validations:
+      required: true
+  - type: input
+    id: unraid
+    attributes:
+      label: Unraid version
+    validations:
+      required: true
+  - type: dropdown
+    id: fs
+    attributes:
+      label: File system inside the volume
+      options: [FAT32, exFAT, NTFS, ext4, XFS, Btrfs, Other or unknown]
+  - type: textarea
+    id: log
+    attributes:
+      label: Messages
+      description: |
+        The error message on the page, or the plugin's lines from the system log
+        (Tools > System Log, search for "veracrypt.mount"). Check them for anything
+        private before posting.
+      render: text

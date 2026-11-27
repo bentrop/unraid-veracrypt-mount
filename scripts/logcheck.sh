@@ -22,7 +22,7 @@ SECRET_FILE="$(dirname "$0")/../.secrets/throwaway-password"
 
 # Empty lines are dropped first: an empty search pattern would match every file.
 remote="sed '/^\$/d' | grep -rlsF -f - /var/log /tmp"
-remote="$remote; echo \"[grep result code on Bob: \$? (1 = found nowhere)]\""
+remote="$remote; echo \"[grep result code on the server: \$? (1 = found nowhere)]\""
 
 echo "Server:  $HOST"
 echo "Command: $remote"

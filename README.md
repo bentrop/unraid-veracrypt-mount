@@ -9,8 +9,8 @@ dismounted cleanly before the array stops or the server shuts down.
 The volumes stay ordinary VeraCrypt volumes: you can still open them with VeraCrypt on
 Windows, just not on both at once.
 
-> **Status: early.** Tested on Unraid 7.4 with throwaway volumes. Try it with a copy of
-> a volume before you trust it with your only one, and keep backups. An XFS volume and
+> **Status: beta.** Works and is tested on Unraid 7.4, but has few users yet. Try it
+> with a copy of a volume before you trust it with your only one, and keep backups. An XFS volume and
 > its copy cannot be mounted at the same time (they share a file system ID); the plugin
 > says so and refuses the second. Btrfs copies can.
 
@@ -32,6 +32,10 @@ Windows, just not on both at once.
 - **Protection against double use:** a volume is not mounted while a network client
   has its file open, because mounting it on the server and on Windows at the same
   time destroys it.
+- **Lock when idle** per volume: dismounted after a chosen time (5 minutes to a day)
+  without reads or writes, as VeraCrypt's own auto-dismount. A file open over its share
+  or a program or other container using it keeps it mounted; its own dependents do
+  not. The pages show the time left.
 - **Read-only switch** per volume, which also limits its share to read-only.
 - **Dashboard tile** and an optional **section on the Main page**, each with a lock
   that mounts and dismounts; the Main page section also opens a mounted volume in
@@ -116,6 +120,9 @@ reinstall picks it up again.
   on the same server does not protect against someone who takes the whole server.
 - **Hidden volumes:** a saved volume records that its file holds a hidden volume. Use
   **Mount a file once** if nobody should be able to tell.
+
+Found a security problem? Please report it privately, as described in
+[`SECURITY.md`](SECURITY.md).
 
 ## Development
 

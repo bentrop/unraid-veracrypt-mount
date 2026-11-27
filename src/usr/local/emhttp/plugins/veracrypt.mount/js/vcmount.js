@@ -80,7 +80,8 @@
 
     /** Mirror of valid_mount_at() in scripts/vcmount for a folder inside a share (MNT-2). */
     function validShareMountAt(path) {
-        return plainMntPath(path) && !/[\\\%]/.test(path) && /^\/mnt\/user\/[^/]+\/[^/]+/.test(path);
+        return plainMntPath(path) && !/[\\\%]/.test(path) && /^\/mnt\/user\/[^/]+\/[^/]+/.test(path)
+            && !/(^|\/)\s|\s(\/|$)/.test(path);
     }
 
     /** Whole non-negative integer, or NaN for decimals and non-digits. */
@@ -1261,9 +1262,16 @@
                 type: 'warning', html: true,
                 showCancelButton: true, confirmButtonText: 'Force dismount', closeOnConfirm: false
             }, function () {
+                // Mounted inside a share (MNT-2): other containers given that
+                // share, and the computers using it, are affected too (audit
+                // 2026-11-27c S3).
+                var vol = lastVolumes.filter(function (x) { return x.name === name; })[0];
+                var inShare = !!(vol && vol.mount_at && vol.mount_at.indexOf('/mnt/user/') === 0);
                 swal({
                     title: 'Force the dismount?',
-                    text: 'Programs that hold ' + esc(name) + ' open are ended, and containers that use it are stopped. Unsaved work in them is lost.',
+                    text: 'Programs that hold ' + esc(name) + ' open are ended, and containers that use it are stopped. Unsaved work in them is lost.'
+                        + (inShare ? '<br><br>It is mounted inside a share, so this can also stop other containers that use that share,'
+                            + ' and end the network connection of a computer that has a file open there.' : ''),
                     type: 'warning', html: true,
                     showCancelButton: true, confirmButtonText: 'Yes, force it', closeOnConfirm: false,
                     showLoaderOnConfirm: true

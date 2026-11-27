@@ -38,7 +38,7 @@ for arg in "$@"; do
 done
 
 remote="VCMOUNT_CONFIG=$REMOTE_DIR/volumes.test.json php $REMOTE_DIR/vcmount $*"
-remote="$remote; echo \"[result code on Bob: \$?]\""
+remote="$remote; echo \"[result code on the server: \$?]\""
 
 needs_password=no
 if [ "$1" = mount ]; then

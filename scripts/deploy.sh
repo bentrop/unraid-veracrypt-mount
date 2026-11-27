@@ -27,7 +27,7 @@ REMOTE_DIR="/tmp/vcmount-dev"
 
 remote="mkdir -p $REMOTE_DIR && tar -xf - --no-same-owner -C $REMOTE_DIR && chmod 755 $REMOTE_DIR/vcmount"
 remote="$remote && php -l $REMOTE_DIR/vcmount && php -l $REMOTE_DIR/actions.php"
-remote="$remote; echo \"[result code on Bob: \$?]\""
+remote="$remote; echo \"[result code on the server: \$?]\""
 
 echo "Server:  $HOST"
 echo "Sends:   $ENGINE_DIR/vcmount"

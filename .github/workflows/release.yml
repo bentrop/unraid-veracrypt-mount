@@ -41,6 +41,16 @@ jobs:
           dir=src/usr/local/emhttp/plugins/veracrypt.mount
           for f in "$dir/scripts/vcmount" "$dir"/include/*.php "$dir"/*.page; do php -l "$f"; done
 
+      - name: Check the shell scripts, the page scripts and the .plg
+        # The hooks run at array stop, where an error would go unnoticed
+        # (audit 2026-11-27c S2).
+        run: |
+          set -e
+          dir=src/usr/local/emhttp/plugins/veracrypt.mount
+          for f in "$dir"/event/* src/usr/local/sbin/vcmount; do bash -n "$f"; done
+          for f in "$dir"/js/*.js; do node --check "$f"; done
+          python3 -I -c "import sys, xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])" plugin/veracrypt.mount.plg
+
       - name: Build the package and check it against the .plg
         run: python3 -I scripts/build.py --check "$GITHUB_REF_NAME"
 

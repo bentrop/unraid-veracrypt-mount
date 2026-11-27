@@ -4,7 +4,8 @@ Status: **agreed** (2026-11-16). Nothing of this is built yet.
 
 This note says how the web pages are put together and, above all, how a password
 travels from the browser to `cryptsetup`. The look follows the mockups that were
-reviewed on 2026-11-15 (`mockups/index.html`, UI-6). The engine is described in
+reviewed on 2026-11-15 (UI-6; the file `mockups/index.html` was removed before going
+public and remains in the Git history). The engine is described in
 `docs/DESIGN-engine.md`; the pages contain no mount logic of their own (CLI-1).
 
 ## 1. How an Unraid plugin page works

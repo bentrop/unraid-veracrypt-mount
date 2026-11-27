@@ -100,6 +100,10 @@ const IDLE_ERROR_FILE = RUN_DIR . '/idle-error';
 // unstoppable container does not retry and flood notifications every minute.
 const STRAY_FAILED_FILE = RUN_DIR . '/stray';
 const STRAY_BACKOFF = 3600;    // seconds before retrying a dependent that failed to stop
+// Written by "cancel-unlock --array-stop" from the array-stop and Docker-stop
+// hooks: the time a stop was asked for. Long actions that hold the lock (the
+// minute check, dependents' start delays) give way to it (audit 2026-11-27c S1).
+const STOP_FILE = RUN_DIR . '/stop';
 
 // Time limits in seconds, so the engine can never hang forever.
 const UNLOCK_TIMEOUT = 180;    // cryptsetup checking a password (slow on purpose)
@@ -922,6 +926,11 @@ function start_dependents(string $volume, array $dependents): array
     $failed = [];
     $last = count($dependents) - 1;
     foreach ($dependents as $i => $dependent) {
+        // Docker or the array is being stopped: start nothing more (audit
+        // 2026-11-27c S1); the hooks stop what runs.
+        if (stop_requested()) {
+            break;
+        }
         $container = $dependent['container'];
         $reason = null;
         if (!docker_ready()) {
@@ -940,8 +949,8 @@ function start_dependents(string $volume, array $dependents): array
         if ($reason !== null) {
             $failed[] = ['container' => $container, 'reason' => $reason];
             log_event("dependent \"$container\" of \"$volume\" could not be started", true);
-        } elseif ($dependent['delay'] > 0 && $i < $last && !$GLOBALS['vcm_stop']) {
-            sleep($dependent['delay']);
+        } elseif ($dependent['delay'] > 0 && $i < $last && !pause($dependent['delay'])) {
+            break;
         }
     }
     return $failed;
@@ -961,6 +970,33 @@ function start_dependents(string $volume, array $dependents): array
  */
 $GLOBALS['vcm_deadline'] = null;   // microtime() by which to be done, or null
 $GLOBALS['vcm_stop'] = false;      // a stop signal arrived
+$GLOBALS['vcm_started'] = time();  // when this run began
+
+/**
+ * Should a long action give way: a stop signal, or a stop of the array or of
+ * Docker asked for by a hook since this run began (audit 2026-11-27c S1)?
+ */
+function stop_requested(): bool
+{
+    if ($GLOBALS['vcm_stop']) {
+        return true;
+    }
+    $asked = read_marker(STOP_FILE);
+    return $asked !== null && preg_match('/\A[0-9]+\z/', trim($asked)) === 1
+        && (int) trim($asked) >= $GLOBALS['vcm_started'];
+}
+
+/** Wait, one second at a time; false if a stop was asked for meanwhile. */
+function pause(int $seconds): bool
+{
+    for ($i = 0; $i < $seconds; $i++) {
+        if (stop_requested()) {
+            return false;
+        }
+        sleep(1);
+    }
+    return !stop_requested();
+}
 
 /**
  * Catch stop signals so they are only noted in $GLOBALS['vcm_stop'] instead of
@@ -1145,8 +1181,13 @@ function user_exists(string $user): bool
 {
     $lines = @file('/etc/passwd', FILE_IGNORE_NEW_LINES);
     foreach ($lines === false ? [] : $lines as $line) {
-        if (explode(':', $line, 2)[0] === $user) {
-            return true;
+        $fields = explode(':', $line);
+        // Only the users Unraid creates (user IDs 1000 and up), as the page
+        // offers them; never root, nobody or a system account (audit
+        // 2026-11-27c S5).
+        if ($fields[0] === $user) {
+            $uid = (int) ($fields[2] ?? -1);
+            return $uid >= 1000 && $uid < 60000;
         }
     }
     return false;
@@ -1432,6 +1473,9 @@ function valid_mount_at(string $point): bool
 {
     return plain_mnt_path($point)
         && strpbrk($point, '\%') === false
+        // No space at the start or end of a folder name: Samba would cut it
+        // off and share another folder (audit 2026-11-27c S5).
+        && preg_match('#(\A|/)\s|\s(/|\z)#', $point) !== 1
         && (preg_match('#\A/mnt/addons/[^/]+#', $point) === 1
             || preg_match('#\A/mnt/user/[^/]+/[^/]+#', $point) === 1);
 }
@@ -1439,8 +1483,17 @@ function valid_mount_at(string $point): bool
 /** Refuse a mount point that is not safe to use. Creates nothing. */
 function check_mount_point(string $point): void
 {
+    // Asked again after a slow unlock: never from PHP's cache (audit 2026-11-27c S5).
+    clearstatcache(true);
     if (!valid_mount_at($point)) {
         throw new Fail("The mount location $point is not valid. It must be under /mnt/addons/ or a folder inside a share under /mnt/user/<share>/.", CODE_USAGE);
+    }
+    // A folder inside a share needs the share: creating /mnt/user/<x> would
+    // make a new Unraid share, for example from a typing error (audit
+    // 2026-11-27c S5).
+    if (preg_match('#\A/mnt/user/([^/]+)/#', $point, $m)
+        && (!is_dir("/mnt/user/{$m[1]}") || is_link("/mnt/user/{$m[1]}"))) {
+        throw new Fail("The mount location $point is not valid: there is no share \"{$m[1]}\". Create it in Unraid first, or correct the name.", CODE_USAGE);
     }
     // No part of the path may be a link, or root would create folders and
     // mount wherever the link points (audit S1). Parts that do not exist yet
@@ -1592,7 +1645,7 @@ function do_mount(string $name, string $file, string $point, bool $read_only,
         }
         if ($r['code'] === 1) {
             // The password was right, but the kernel cannot map the volume: on
-            // Bob only TrueCrypt volumes from before 5.0 (cipher cascades in CBC
+            // the test server only TrueCrypt volumes from before 5.0 (cipher cascades in CBC
             // mode, Blowfish) did this (TC-1).
             throw new Fail('cryptsetup could not open the volume (its result code was 1). If it is an old '
                 . 'TrueCrypt volume (before version 5.0), Linux cannot open its cipher mode: copy its files '
@@ -1860,6 +1913,11 @@ function command_mount(array $args, array $options, bool $json): int
     }
 
     $lock = take_lock();
+    // A save between reading the settings and taking the lock: start again
+    // with the new ones (audit 2026-11-27c S8).
+    if ($saved && (load_config()[$name] ?? null) !== $volume) {
+        throw new Fail("The settings of \"$name\" changed just now. Try again.", CODE_IN_PROGRESS);
+    }
     // Catch stop signals across the whole mount so a signal never cuts off the
     // engine between unlocking, mounting, sharing and starting dependents
     // (review C5). During cryptsetup, run() replaces these temporarily to stop
@@ -2046,12 +2104,51 @@ function mount_users(string $device_number): array
 
     $containers = [];
     foreach (array_keys($ids) as $id) {
-        $id = (string) $id;
-        $r = run([program('docker'), 'inspect', '--type', 'container', '--format', '{{.Name}}', $id], TOOL_TIMEOUT);
-        $label = $r['code'] === 0 ? ltrim(trim($r['out']), '/') : substr($id, 0, 12);
-        $containers[$id] = "container $label";
+        $containers[(string) $id] = container_label((string) $id);
     }
     return ['containers' => $containers, 'programs' => $programs];
+}
+
+/** "container <name>" for a Docker container ID, or its short ID if unknown. */
+function container_label(string $id): string
+{
+    $r = run([program('docker'), 'inspect', '--type', 'container', '--format', '{{.Name}}', $id], TOOL_TIMEOUT);
+    return 'container ' . ($r['code'] === 0 ? ltrim(trim($r['out']), '/') : substr($id, 0, 12));
+}
+
+/**
+ * Forced dismount only: stop these containers with "docker stop", never by
+ * killing their programs one by one (audit 2026-11-27c S3). $containers maps
+ * Docker ID => label. Returns notes; logs for a saved volume.
+ */
+function force_stop_containers(array $containers, string $name, bool $saved): array
+{
+    $notes = [];
+    $stopped = [];
+    $failed = [];
+    foreach ($containers as $id => $container) {
+        $wait = fitting(FORCE_WAIT, 5);
+        $r = run([program('docker'), 'stop', '-t', (string) $wait, (string) $id], $wait + 30);
+        // Report only what Docker confirms (audit B12).
+        if ($r['code'] === 0) {
+            $stopped[] = "\"$container\"";
+        } else {
+            $failed[] = "\"$container\"";
+        }
+    }
+    if ($stopped !== []) {
+        $notes[] = 'Forced: stopped ' . implode(', ', $stopped) . '.';
+        if ($saved) {
+            log_event("dismount of \"$name\" forced: stopped " . implode(', ', $stopped), true);
+        }
+    }
+    if ($failed !== []) {
+        $notes[] = 'Could not stop ' . implode(', ', $failed) . '.';
+        if ($saved) {
+            log_event("dismount of \"$name\" forced: could not stop " . implode(', ', $failed), true);
+        }
+    }
+    return $notes;
 }
 
 /** The process numbers of this program and of everything that started it. */
@@ -2161,6 +2258,9 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
     $device_number = $dm === null ? '' : trim((string) @file_get_contents("/sys/block/$dm/dev"));
 
     // First the share, so network clients let go of the volume (section 9b).
+    // Only then is waiting for Samba's workers worth it below (audit
+    // 2026-11-27c S1): at array stop Samba has already stopped.
+    $share_closed = (is_file(share_file($name)) || hook_has($name)) && samba_running();
     $notes = remove_share($name);
     if ($notes !== [] && $saved) {
         log_event("share of \"$name\" could not be removed cleanly", true);
@@ -2175,18 +2275,37 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
         $r = run([program('umount'), $point], TOOL_TIMEOUT);
         // Closing the share only asks Samba to let go; its workers may need a
         // moment. Try again for up to two seconds before calling it busy
-        // (audit B7).
-        for ($try = 0; $r['code'] !== 0 && $try < 4; $try++) {
+        // (audit B7), but only if a share was closed.
+        for ($try = 0; $share_closed && $r['code'] !== 0 && $try < 4; $try++) {
             usleep(500000);
             $r = run([program('umount'), $point], TOOL_TIMEOUT);
         }
         if ($r['code'] !== 0 && $force) {
-            $ended = end_programs(holders($point));
+            // Programs inside a container (a container given the same path, or
+            // all of /mnt/user) are not killed one by one: their container is
+            // stopped, so a restart policy cannot bring them straight back
+            // (audit 2026-11-27c S3).
+            $outside = [];
+            $containers = [];
+            foreach (holders($point) as $holder) {
+                $id = process_container_id('/proc/' . $holder['pid']);
+                if ($id === null) {
+                    $outside[] = $holder;
+                } elseif (!isset($containers[$id])) {
+                    $containers[$id] = container_label($id);
+                }
+            }
+            $ended = end_programs($outside);
             if ($ended !== []) {
                 $notes[] = 'Forced: ended ' . implode(', ', $ended) . '.';
                 if ($saved) {
                     log_event("dismount of \"$name\" forced: ended " . quoted_list($ended), true);
                 }
+            }
+            if ($containers !== []) {
+                $notes = array_merge($notes, force_stop_containers($containers, $name, $saved));
+            }
+            if ($ended !== [] || $containers !== []) {
                 $r = run([program('umount'), $point], TOOL_TIMEOUT);
             }
         }
@@ -2222,30 +2341,7 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
     if (!$locked && $device_number !== '') {
         $users = mount_users($device_number);
         if ($force && $users['containers'] !== []) {
-            $stopped = [];
-            $failed = [];
-            foreach ($users['containers'] as $id => $container) {
-                $wait = fitting(FORCE_WAIT, 5);
-                $r = run([program('docker'), 'stop', '-t', (string) $wait, (string) $id], $wait + 30);
-                // Report only what Docker confirms (audit B12).
-                if ($r['code'] === 0) {
-                    $stopped[] = "\"$container\"";
-                } else {
-                    $failed[] = "\"$container\"";
-                }
-            }
-            if ($stopped !== []) {
-                $notes[] = 'Forced: stopped ' . implode(', ', $stopped) . '.';
-                if ($saved) {
-                    log_event("dismount of \"$name\" forced: stopped " . implode(', ', $stopped), true);
-                }
-            }
-            if ($failed !== []) {
-                $notes[] = 'Could not stop ' . implode(', ', $failed) . '.';
-                if ($saved) {
-                    log_event("dismount of \"$name\" forced: could not stop " . implode(', ', $failed), true);
-                }
-            }
+            $notes = array_merge($notes, force_stop_containers($users['containers'], $name, $saved));
             $locked = lock_again($mapper);
             if (!$locked) {
                 $users = mount_users($device_number);
@@ -2276,13 +2372,12 @@ function dismount_all(bool $json, bool $force): int
 {
     // A fault in the configuration must not keep volumes mounted. Without the
     // configuration every volume counts as "not saved", so nothing is logged.
+    $lock = take_lock();
     try {
         $config = load_config();
     } catch (Fail $e) {
         $config = [];
     }
-
-    $lock = take_lock();
     $results = [];
     $failed = false;
     foreach (live_volumes() as $name => $live) {
@@ -2292,7 +2387,11 @@ function dismount_all(bool $json, bool $force): int
             $failed = true;
             $results[] = ['name' => $name, 'ok' => false, 'code' => CODE_BUSY,
                           'error' => "\"$name\" was left mounted: no time was left.", 'details' => null];
-            log_event("dismount of \"$name\" was not started: no time was left", isset($config[$name]));
+            // Only for a saved volume: a "Mount a file once" volume leaves no
+            // trace in the log (PRIV-2, audit 2026-11-27c S4).
+            if (isset($config[$name])) {
+                log_event("dismount of \"$name\" was not started: no time was left", true);
+            }
             continue;
         }
         try {
@@ -2358,10 +2457,11 @@ function command_dismount(array $args, array $options, bool $json): int
     if (!preg_match(NAME_PATTERN, $name)) {
         throw new Fail('That is not a valid volume name.', CODE_USAGE);
     }
+    // The settings are read under the lock, so a save cannot slip in between
+    // (audit 2026-11-27c S8).
+    $lock = take_lock();
     $volume = load_config()[$name] ?? null;
     $saved = $volume !== null;
-
-    $lock = take_lock();
     $live = live_volumes()[$name] ?? null;
     if ($live === null) {
         if (!$saved) {
@@ -2386,13 +2486,13 @@ function command_stop_dependents(array $args, array $options, bool $json): int
         throw new Fail('Usage: vcmount stop-dependents --all [--within <seconds>]', CODE_USAGE);
     }
     watch_time($options);
+    $lock = take_lock();
     // A fault in the configuration must not stop this either (audit B15).
     try {
         $config = load_config();
     } catch (Fail $e) {
         $config = [];
     }
-    $lock = take_lock();
     $live = live_volumes();
     $results = [];
     foreach ($config as $name => $volume) {
@@ -2428,8 +2528,8 @@ function command_start_dependents(array $args, array $options, bool $json): int
     if (!$options['all'] || $args !== []) {
         throw new Fail('Usage: vcmount start-dependents --all', CODE_USAGE);
     }
-    $config = load_config();
     $lock = take_lock();
+    $config = load_config();
     $live = live_volumes();
     $failed = [];
     $started = 0;
@@ -2465,8 +2565,8 @@ function command_repair_shares(array $args, bool $json): int
     if ($args !== []) {
         throw new Fail('Usage: vcmount repair-shares', CODE_USAGE);
     }
-    $config = load_config();
     $lock = take_lock();
+    $config = load_config();
     $live = live_volumes();
     $notes = [];
     $failed = false;
@@ -2977,6 +3077,8 @@ function command_idle_check(array $args, bool $json, array $extra = []): int
         }
         return CODE_OK;   // another action runs; look again in a minute
     }
+    // Read again under the lock (audit 2026-11-27c S8).
+    $watched = array_filter(load_config(), fn($v) => $v['idle_lock'] !== null);
 
     $live = live_volumes();
     $old = idle_state();
@@ -2999,6 +3101,10 @@ function command_idle_check(array $args, bool $json, array $extra = []): int
         }
         $state[$name] = $entry;
         if ($now - $entry['since'] < $volume['idle_lock'] * 60) {
+            continue;
+        }
+        // The array or Docker is being stopped: the hooks dismount, not this.
+        if (stop_requested() || !array_started()) {
             continue;
         }
         $blockers = idle_blockers($volume, $vol['mounted_at'], $dm);
@@ -3211,7 +3317,7 @@ function stray_dependents(): array
     $stopped = [];
     foreach ($to_stop as $container) {
         $container = (string) $container;
-        if (!array_started()) {
+        if (!array_started() || stop_requested()) {
             break;
         }
         if (!isset($wanted[$container]) || container_running($container) !== true) {
@@ -3287,11 +3393,17 @@ function stray_dependents(): array
  * Without --unlock-id (from SSH or array-stop hooks): reads the running
  * unlock's token from UNLOCKING_FILE and writes it; if no unlock is running,
  * does nothing.
+ * With --array-stop (from the array-stop and Docker-stop hooks): also notes
+ * the time in STOP_FILE, so the minute check and dependents' start delays give
+ * way (audit 2026-11-27c S1).
  */
-function command_cancel_unlock(array $args, ?string $unlock_id, bool $json): int
+function command_cancel_unlock(array $args, ?string $unlock_id, bool $json, bool $array_stop = false): int
 {
-    if ($args !== []) {
-        throw new Fail('Usage: vcmount cancel-unlock [--unlock-id <id>]', CODE_USAGE);
+    if ($args !== [] || ($array_stop && $unlock_id !== null)) {
+        throw new Fail('Usage: vcmount cancel-unlock [--unlock-id <id> | --array-stop]', CODE_USAGE);
+    }
+    if ($array_stop && !write_marker(STOP_FILE, (string) time())) {
+        throw new Fail('Could not create ' . STOP_FILE . '.', CODE_USAGE);
     }
     if ($unlock_id !== null && !preg_match(UNLOCK_TOKEN_PATTERN, $unlock_id)) {
         throw new Fail('That is not a valid unlock identifier.', CODE_USAGE);
@@ -3459,6 +3571,19 @@ function command_fix_permissions(array $args, bool $json): int
     $tool = '/usr/local/sbin/newperms';
     if (!is_executable($tool)) {
         throw new Fail("Unraid's permission tool $tool was not found.", CODE_USAGE);
+    }
+    // newperms splits its argument at "*" and decodes "%xx" (checked on Unraid
+    // 7.4), so such a path would reach other folders.
+    if (strpbrk($point, '*%') !== false) {
+        throw new Fail("Unraid's permission tool cannot handle the mount location $point (it contains * or %).", CODE_REFUSED);
+    }
+    // Not twice at once on the same folder (audit 2026-11-27c S5): it runs on
+    // in the background after this command ends.
+    foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $cmdline) {
+        $parts = explode("\0", (string) @file_get_contents($cmdline));
+        if (in_array($tool, $parts, true) && in_array($point, $parts, true)) {
+            throw new Fail("Fixing the permissions of \"{$args[0]}\" is still running.", CODE_IN_PROGRESS);
+        }
     }
     // In the background, cut loose from this program's output: the folder is
     // passed as an argument, never as part of a command line.
@@ -3841,7 +3966,7 @@ function main(array $argv): int
             case 'idle-check':
                 return minute_check_reported($args, $json);
             case 'cancel-unlock':
-                return command_cancel_unlock($args, $options['unlock_id'], $json);
+                return command_cancel_unlock($args, $options['unlock_id'], $json, $options['array_stop']);
             case 'privacy':
                 return command_privacy($args, $json);
             case 'info':

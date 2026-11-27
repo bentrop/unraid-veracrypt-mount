@@ -56,7 +56,7 @@ case "$case" in
 esac
 
 remote="bash $REMOTE_DIR/enginetest-on-bob.sh $case"
-remote="$remote; echo \"[result code on Bob: \$?]\""
+remote="$remote; echo \"[result code on the server: \$?]\""
 
 echo "Server:  $HOST"
 echo "Command: $remote"

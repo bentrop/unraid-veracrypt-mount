@@ -28,7 +28,6 @@ DEV_CONFIG="$(dirname "$0")/../scripts/volumes.dev.json"
 [ -f "$DEV_CONFIG" ] && export VCMOUNT_CONFIG="$DEV_CONFIG"
 # dev-only-end
 VAR_INI=/var/local/emhttp/var.ini
-WAIT=5   # seconds between tries while another vcmount action is running
 
 say() { logger -t veracrypt.mount "Docker stop: $*"; }
 
@@ -40,7 +39,6 @@ budget=$((shutdown_timeout / 2))
 
 SECONDS=0   # bash counts the seconds since this line by itself
 code=0
-cancelled=no
 while :; do
     left=$((budget - SECONDS))
     [ "$left" -gt 0 ] || break
@@ -50,16 +48,13 @@ while :; do
     # 15 seconds later it is ended for good (audit S2).
     timeout -k 15 "$left" "$VCMOUNT" stop-dependents --all --within "$left" < /dev/null > /dev/null 2>&1
     code=$?
-    # Code 6: another vcmount action is still running. If it is an unlock,
-    # cancel it first (UI-8): it must not hold up the array stop (audit S2).
+    # Code 6: another vcmount action is still running. Ask it to give way: an
+    # unlock is cancelled (UI-8, audit S2); the minute check and dependents'
+    # start delays stop within a second (audit 2026-11-27c S1). Asked on every
+    # round, since an unlock may only start a moment after the first ask.
     [ "$code" -eq 6 ] || break
-    if [ "$cancelled" = no ]; then
-        "$VCMOUNT" cancel-unlock < /dev/null > /dev/null 2>&1
-        cancelled=yes
-        sleep 2
-    else
-        sleep "$WAIT"
-    fi
+    "$VCMOUNT" cancel-unlock --array-stop < /dev/null > /dev/null 2>&1
+    sleep 2
 done
 
 case "$code" in

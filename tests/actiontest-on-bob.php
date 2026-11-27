@@ -46,6 +46,11 @@ function check(bool $ok, string $what): void
 /** A request as the web page sends it. Over plain HTTP unless $https. */
 function ask(array $post, bool $https = false): array
 {
+    // save-config needs the revision the page read (audit S11); add the
+    // current one unless a test sets its own (audit 2026-11-27c B3).
+    if (($post['action'] ?? '') === 'save-config' && !array_key_exists('revision', $post)) {
+        $post['revision'] = is_file(CONFIG) ? hash('sha256', (string) file_get_contents(CONFIG)) : 'none';
+    }
     $answer = vcm_handle($post, $https, ENGINE);
     $show = $answer;
     unset($show['volumes'], $show['volume']);

@@ -203,7 +203,7 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
             // one only when the page sent it; the engine then says it is wrong.
             // The password always ends with a line break: with keyfiles and no
             // password, cryptsetup needs an empty line, and refuses no input
-            // at all ("Nothing to read on input", tested on Bob, audit B5).
+            // at all ("Nothing to read on input", tested on the test server, audit B5).
             $stdin = $password . "\n" . ($pim === '' ? '' : $pim . "\n");
             unset($password, $pim);
             break;

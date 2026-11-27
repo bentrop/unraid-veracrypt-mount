@@ -24,7 +24,21 @@ removepkg, so every file it brings is also taken away again.
 ##VeraCrypt Mount
 
 ###&version;
-- See the commit history on GitHub.
+- TrueCrypt volumes open too (tested with cryptsetup's sample volumes); a clear message for very old ones (before TrueCrypt 5.0) that Linux cannot open.
+- Safer internals from the final audit: runtime files in a root-only folder, Cancel stops only its own unlock, a stop signal never leaves a half-mounted volume, one set of input checks, a clear message when an XFS volume has the same ID as a disk.
+- The dialogs work fully with the keyboard and screen readers.
+
+###2026.11.27p
+- An XFS copy of a mounted volume is refused with a clear message; fixes from the second security audit.
+
+###2026.11.27o
+- Containers tied to a volume are stopped if they run while it is locked.
+
+###2026.11.27l
+- Lock when idle: a volume is dismounted after a chosen time without activity.
+
+###Earlier
+- Mount, share and dismount VeraCrypt volumes; dependent containers; Dashboard tile and Main page section; safe dismount at array stop and shutdown. The full history is on GitHub.
 </CHANGES>
 
 <FILE Run="/bin/bash">
@@ -94,30 +108,28 @@ echo ""
 </INLINE>
 </FILE>
 
-<!-- Removal. Volumes are dismounted first, never forced: if one is still in
-     use, the removal stops and nothing is taken away, so no volume is left
-     mounted without the hooks that dismount it when the array stops. The
-     saved volume list (volumes.json) stays on the flash drive. -->
+<!-- Removal. Refused while any volume is unlocked or mounted, or while
+     another vcmount action runs, and then nothing at all is changed (LIFE-6,
+     audit 2026-11-27c S2): no volume is left mounted without the hooks that
+     dismount it when the array stops. The minute check goes first, so it
+     cannot run during the removal; then leftover shares of this plugin are
+     taken out of Samba's settings. The saved volume list (volumes.json) stays
+     on the flash drive. -->
 <FILE Run="/bin/bash" Method="remove">
 <INLINE>
-if [ -x /usr/local/emhttp/plugins/&name;/scripts/vcmount ]; then
-  code=0
-  for _ in 1 2 3; do
-    /usr/local/emhttp/plugins/&name;/scripts/vcmount dismount --all
-    code=$?
-    [ "$code" -ne 6 ] &amp;&amp; break
-    sleep 2
-  done
-  if [ "$code" -eq 6 ]; then
-    echo "Not removed: another vcmount action is still running. Wait a moment and remove the plugin again."
-    exit 1
-  elif [ "$code" -ne 0 ]; then
-    echo "Not removed: a volume is still mounted and in use. Dismount it, then remove the plugin again."
-    exit 1
-  fi
+E=/usr/local/emhttp/plugins/&name;/scripts/vcmount
+set -- /dev/mapper/vcm-*
+if [ -e "$1" ]; then
+  echo "Not removed: $# volume(s) still unlocked or mounted. Dismount all volumes first (Dismount all on the Volumes tab), then remove the plugin again."
+  exit 1
+fi
+if [ -x "$E" ] &amp;&amp; "$E" busy 2&gt;/dev/null | grep -q "is running"; then
+  echo "Not removed: a vcmount action is still running. Wait a moment and remove the plugin again."
+  exit 1
 fi
 rm -f &flash;/&name;.cron
 /usr/local/sbin/update_cron
+[ -x "$E" ] &amp;&amp; "$E" repair-shares &gt;/dev/null 2&gt;&amp;1
 removepkg &name;
 rmdir /etc/samba/veracrypt-shares 2&gt;/dev/null
 rm -f &flash;/&name;-*.txz

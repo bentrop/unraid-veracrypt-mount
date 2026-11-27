@@ -52,7 +52,7 @@ case "$action" in
         exit 1
         ;;
 esac
-remote="$remote; echo \"[result code on Bob: \$?]\""
+remote="$remote; echo \"[result code on the server: \$?]\""
 
 echo "Server:  $HOST"
 if [ "$action" = install ]; then

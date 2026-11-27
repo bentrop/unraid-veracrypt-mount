@@ -75,7 +75,7 @@ case "$action" in
         remote="mkdir -p $mountpoint && mount -t $fstype -o $opts /dev/mapper/$mapper $mountpoint"
         ;;
     write)
-        remote="echo 'written on Bob' > $mountpoint/written-on-bob.txt && ls -la $mountpoint"
+        remote="echo 'written on the server' > $mountpoint/written-on-server.txt && ls -la $mountpoint"
         ;;
     umount)
         remote="umount $mountpoint && rmdir $mountpoint"
@@ -90,7 +90,7 @@ esac
 
 # Windows' SSH program reports a wrong result code when run from Git Bash, so the
 # server prints the real one itself as the last line of the output.
-remote="$remote; echo \"[result code on Bob: \$?]\""
+remote="$remote; echo \"[result code on the server: \$?]\""
 
 echo "Server:  $HOST"
 echo "Command: $remote"

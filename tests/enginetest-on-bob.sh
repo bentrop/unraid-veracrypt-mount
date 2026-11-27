@@ -318,7 +318,7 @@ dismount-all)
             *) bad "the message does not name the sleep (process $holder)" ;;
         esac
         check "volume is still mounted" is_mounted "$NAME"
-        check "the system log names the sleep" grep -q "still in use by sleep (process $holder)" /var/log/syslog
+        check "the system log names the sleep" grep -q "still in use by \"sleep (process $holder)\"" /var/log/syslog
 
         step "Stop the sleep, dismount all again"
         kill "$holder"
@@ -397,7 +397,7 @@ force)
         echo "$out"
         expect_code 0 $code "dismount --force"
         has_text "Forced: ended sleep (process $holder)" "$out" "the sleep was ended"
-        has_text "Forced: stopped container vcm-test-holder" "$out" "the container was stopped"
+        has_text 'Forced: stopped "container vcm-test-holder"' "$out" "the container was stopped"
         check_not "the sleep is gone" kill -0 "$holder"
         check_not "vcm-test-holder is not running" running vcm-test-holder
         check "volume is locked" is_locked "$NAME"

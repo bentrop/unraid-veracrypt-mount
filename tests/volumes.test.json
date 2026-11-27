@@ -1,4 +1,5 @@
 {
+    "settings": { "log_names": true },
     "volumes": [
         {
             "name": "throwaway-ntfs",
