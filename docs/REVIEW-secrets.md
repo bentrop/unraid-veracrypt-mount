@@ -1013,3 +1013,42 @@ without its PIM, with an unexpected PIM, or with no password and no keyfile.
   message while its original was mounted outside the plugin; in the browser a cancel
   right after Mount, Tab and Escape in both dialogs, the focus mark on the tile.
 - **Not tested on Bob:** a stop signal timed exactly between unlock and mount (C5).
+
+## 15. Full pre-release audit (2026-11-27c)
+
+Neon (Gemini in Antigravity) audited the whole repository at `b69c8f6`, report only
+(`docs/AUDIT-2026-11-27c.md`). Verdict: no critical or high finding; SEC-1 holds end to
+end. Claude fixed the findings in two batches, tested on Bob with throwaway volumes and
+containers.
+
+- **Password path (S6):** `$post` is passed by reference from `action.php` to
+  `vcm_handle()`, which takes the password and PIM out of it at once; `vcm_run()` takes
+  the joined input by reference and sets it to null as soon as the pipe has it, so no
+  second copy waits in PHP-FPM memory during the unlock. Secrets still reach the engine
+  only on standard input; nothing new on any command line.
+- **Array stop (S1):** the hooks cancel a running unlock on every retry and leave a stop
+  request that the minute check and dependents' start delays honour within a second
+  (a 60-second delay ended after 7 seconds in the test); Samba retries only when a
+  share was closed while Samba runs.
+- **Removal (S2):** refused while anything is unlocked or mounted, then nothing is
+  changed; the cron job goes before the package; leftover shares are cleaned. The
+  release workflow also checks the hooks, the JavaScript and the `.plg`.
+- **Forced dismount (S3):** containers holding a volume are stopped with `docker stop`,
+  never by killing their programs; the dialog warns for volumes inside a share.
+- **Privacy (S4):** a one-off mount is never logged at an array-stop timeout. Samba
+  workers are shown as "Samba", because their process name carries part of the
+  client's address.
+- **Root path edges (S5):** a mount inside a share needs the share; no spaces at folder
+  ends; share users only Unraid users (ID 1000 and up); Fix permissions runs once at a
+  time and never for paths with `*` or `%`, which Unraid's `newperms` would misread
+  (it quotes its argument and does not follow links; read on Bob).
+- **Lock order (S8):** settings read under the lock.
+- **Page and engine bugs:** B1 to B7 and the Edit note (see the commit messages of
+  batch 1 and 2). New beyond the audit, from the owner's test: a normal dismount with
+  a file open over the network is refused before anything changes; force is one dialog
+  with Cancel focused.
+- **Not fixed:** S1.4 (sharing the stop time fairly across volumes; S1.2 and S1.3
+  remove most of the risk), and a few cosmetic items noted in the audit as harmless.
+- **Not tested on Bob:** keyfile-only volume with a PIM (no such test volume);
+  container mount propagation for volumes inside a share (S3.2 is a warning only);
+  removal refusing while mounted (needs the full install, phase 2).

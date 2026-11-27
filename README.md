@@ -24,14 +24,18 @@ Windows, just not on both at once.
   no access, read-only or read/write; the share can be hidden from network browsing.
 - **Dependents:** containers that run only while their volume is mounted. They start
   in the order you set and stop in reverse, each with its own grace period before it
-  is stopped by force.
+  is stopped by force. A dependent started while its volume is locked (by hand or by
+  Docker) is stopped again within a minute, so it cannot write into the empty mount
+  folder.
 - **Safe dismount:** before the array stops or the server shuts down, the dependents
-  are stopped and every volume is dismounted. A volume that is still in use can be
-  dismounted by force (on by default for array stop; always with a confirmation in
-  the web page).
-- **Protection against double use:** a volume is not mounted while a network client
-  has its file open, because mounting it on the server and on Windows at the same
-  time destroys it.
+  are stopped and every volume is dismounted. A normal dismount never takes a volume
+  away from a program or a computer that still uses it, a file open over the network
+  included: it stops and says who holds it, and nothing is changed. You can then force
+  it (one confirmation, which names what forcing ends). At array stop force is on by
+  default, so a busy volume cannot hold up the stop.
+- **Protection against double use:** a volume is not mounted while a computer has its
+  file open over a Windows share (SMB), because mounting it on the server and on
+  Windows at the same time destroys it. NFS clients are not checked.
 - **Lock when idle** per volume: dismounted after a chosen time (5 minutes to a day)
   without reads or writes, as VeraCrypt's own auto-dismount. A file open over its share
   or a program or other container using it keeps it mounted; its own dependents do
@@ -43,13 +47,14 @@ Windows, just not on both at once.
 - **`vcmount`**, a command-line tool for SSH, which is also the engine behind the
   pages. Run `vcmount help` for its commands.
 - **Warning for File Activity:** if that plugin is installed and would record the
-  names of files on your volumes, the Volumes tab shows the one exclusion line to add.
+  names of files on your saved volumes, the Volumes tab shows the one exclusion line to
+  add.
 
 ## Requirements and limits
 
 - Unraid **7.4** or newer.
-- VeraCrypt volumes opened with a **password**, optionally with a **PIM** and
-  **keyfiles**, including **hidden volumes**, with **FAT32, exFAT, NTFS, ext2/3/4,
+- VeraCrypt volumes opened with a **password** and/or **keyfiles**, optionally with a
+  **PIM**, including **hidden volumes**, with **FAT32, exFAT, NTFS, ext2/3/4,
   XFS or Btrfs** inside. FAT32, exFAT and NTFS also open in VeraCrypt on Windows; ext4,
   XFS and Btrfs keep Unix owners and permissions, which containers need, but open only
   on Linux. (VeraCrypt on Windows creates only the first three; for the others, create
@@ -89,10 +94,17 @@ https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/ver
 Then open **Settings › User Utilities › VeraCrypt Mount** and add a volume: a name and
 its file are enough to start.
 
-**Uninstall** through the Plugins page. All volumes are dismounted first (never by
-force; if one is still in use, the removal stops and nothing is taken away). Your list
-of volumes stays in `/boot/config/plugins/veracrypt.mount/volumes.json`, so a
-reinstall picks it up again.
+**What runs in the background:** the plugin adds one job that runs every minute as
+root (`vcmount check`). It locks volumes that were idle for their set time and stops
+dependents that run while their volume is locked; with nothing to do it only reads a
+few files. At array start, array stop and shutdown, three small hook scripts start and
+stop the dependents and dismount the volumes.
+
+**Updates** keep mounted volumes mounted. **Uninstall** through the Plugins page: it is
+refused while any volume is unlocked or mounted (dismount them first; nothing is
+changed). Your list of volumes stays in
+`/boot/config/plugins/veracrypt.mount/volumes.json`, so a reinstall picks it up
+again.
 
 ## Security and privacy
 
@@ -104,7 +116,8 @@ reinstall picks it up again.
   on, a page opened over plain HTTP offers no password field at all, because over
   plain HTTP the password would cross your network unencrypted. If you use Unraid
   without HTTPS, switch the setting off once on the plugin's Settings tab; the page
-  then warns before each mount. Over SSH (`vcmount mount <name>`) the password is
+  then warns before each mount. Behind a reverse proxy that talks plain HTTP to
+  Unraid, the page counts as HTTP too. Over SSH (`vcmount mount <name>`) the password is
   always encrypted on the way.
 - **Review:** the password path was reviewed separately from the code that implements
   it; see [`docs/REVIEW-secrets.md`](docs/REVIEW-secrets.md).
@@ -115,7 +128,8 @@ reinstall picks it up again.
   volume, recent-file lists and thumbnails on Windows computers that used the share,
   activity-logging plugins that record when the volume file is opened, and the shell
   history if you use `vcmount` over SSH with a file path, and the paths of the volume
-  file and its keyfiles in the process list for the moment a volume is being mounted.
+  file and its keyfiles in the process list while a volume is being unlocked (up to
+  three minutes with a large PIM).
 - **Keyfiles** must lie under `/mnt/` (a share, disk or removable drive). A keyfile kept
   on the same server does not protect against someone who takes the whole server.
 - **Hidden volumes:** a saved volume records that its file holds a hidden volume. Use

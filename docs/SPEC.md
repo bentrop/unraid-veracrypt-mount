@@ -146,6 +146,9 @@ Nothing needs to be installed on the server.
 - **FS-5 (Agreed)** A volume marked dirty (after a crash or power cut) is **not**
   force-mounted. The plugin reports it and explains the repair: `chkdsk` on Windows for
   NTFS. For exFAT, offer `fsck.exfat` after explicit confirmation.
+  Built (2026-11-27): the refusal names the repair (chkdsk in VeraCrypt on Windows for
+  FAT, exFAT and NTFS; fsck for the Linux file systems). Running `fsck.exfat` from the
+  plugin is not built; repairs stay with the user.
 - **FS-6 (Agreed 2026-11-17)** On ext4, XFS and Btrfs the top folder of a new volume
   belongs to `root:root` with `0755`, so its share (which writes as `nobody:users`)
   cannot write. The mount never changes permissions by itself. When a saved volume with
@@ -207,8 +210,8 @@ Nothing needs to be installed on the server.
   Built: `vcmount options` reads Unraid's autostart list (`/var/lib/docker/unraid-autostart`)
   and each container's restart policy; the edit panel marks such a dependent on its row
   ("autostart on", "restart policy"), explains below the list and shows the mark on the
-  closed section too. DOC-6 (stopping one started by hand) is not built yet: it needs a
-  watcher of Docker's events.
+  closed section too. DOC-6 (stopping one started by hand) is built into the minute
+  check instead.
 - **DOC-8 (Agreed)** Both Unraid-template containers and Compose stacks are supported.
   Version 1 starts and stops existing containers; full `up`/`down` integration with
   Compose Manager can follow.
@@ -242,12 +245,21 @@ Nothing needs to be installed on the server.
   are killed; network clients are disconnected from the share) and then dismounts
   normally, so the filesystem is closed cleanly and the volume is really locked. A
   "lazy" dismount, which hides a volume but leaves it unlocked, is never used.
+  Changed 2026-11-27: the web page offers force in **one** dialog after the normal
+  dismount failed, naming what holds the volume and what forcing ends, with Cancel
+  focused (VeraCrypt itself asks once). A file open over the network (SMB) counts as
+  use: a normal dismount is then refused before anything is changed, the share
+  included. A normal dismount that stops at a busy volume puts its share back and
+  restarts its dependents (audit 2026-11-27c B2). Inside the containers of a forced
+  dismount, programs are not killed one by one; the container is stopped (S3).
 - **LIFE-10 (Agreed)** On array stop, shutdown and reboot the dismount uses force. A
   setting turns this off. Reason: otherwise a busy volume makes the array stop hang, or
   Unraid cuts the power with the volume still mounted.
-- **LIFE-6 (Agreed)** Plugin update and removal while volumes are mounted are refused
-  with a clear message. The plugin does not dismount automatically in this case; the
-  user dismounts first and then repeats the update or removal.
+- **LIFE-6 (Agreed, changed 2026-11-27)** Plugin **removal** while a volume is unlocked
+  or mounted, or while a vcmount action runs, is refused with a clear message and
+  changes nothing; the user dismounts first and removes again. A plugin **update** is
+  allowed while volumes are mounted: it only replaces the plugin's files, mounts, shares
+  and dependents keep running (an open page may need a reload).
 - **LIFE-7 (Agreed)** State is read from the live system (device mapper, mount table),
   not from files, so it survives plugin updates and is correct after a crash.
 - **LIFE-8 (Agreed, built 2026-11-27)** Optional idle auto-lock per volume, default off.
@@ -923,5 +935,6 @@ throwaway containers from `alpine:3.21`, run with `scripts/enginetest.sh`).**
 | 2026-11-15 | Docker control starts with single containers; Compose stacks follow as a later step. |
 | 2026-11-16 | SMB sharing design agreed (one file per share, include line in `smb-unassigned.conf`). Web interface design agreed (`docs/DESIGN-ui.md`), with U1 to U4. |
 | 2026-11-16 | Step 3 of the web interface: shares only with Unraid's "Private" security, per user (SHR-1); dependents reordered by drag and drop as on Unraid's Docker page; a mounted volume cannot be renamed or removed (D3); saving checks the revision so a change in another tab is not overwritten. PRIV-3 extended: ready-to-copy File Activity exclusions. |
+| 2026-11-27 | Full pre-release audit (docs/AUDIT-2026-11-27c.md) fixed in two batches. LIFE-6 changed: removal refuses while anything is mounted and changes nothing; updates stay allowed. LIFE-5 changed: one force dialog; a file open over the network blocks a normal dismount; a busy normal dismount restores share and dependents. Array stop: hooks leave a stop request that the minute check and dependents' start delays give way to. |
 | 2026-11-27 | TrueCrypt volumes supported without a setting of their own (TC-1): the unlock already tries both formats. No TrueCrypt-only password limit (64 bytes) or PIM check: a TrueCrypt volume cannot have a longer password or a PIM, so a wrong entry is simply a wrong password. Documented as tested with sample volumes only. |
 | 2026-11-27 | Default grace period of a new dependent lowered from 60 to 10 seconds, as Docker's own `docker stop`; a dependent that needs longer is killed and reported, so it can be raised. DOC-7 built; DOC-6 later. |

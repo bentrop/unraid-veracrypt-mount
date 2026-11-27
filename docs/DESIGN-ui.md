@@ -131,8 +131,13 @@ Following the mockups:
 - **Volumes tab.** One row per volume: name, state, where mounted, size and free space,
   share, dependents. Buttons: Mount (opens the password dialog), Dismount, Edit. Below:
   Add volume, Mount a file once (VOL-5), Mount all, Dismount all (VOL-6).
-- **Dismount that fails (code 5).** The dialog shows which programs hold the volume
-  open and offers Force, with a second confirmation (LIFE-5).
+- **Dismount that fails (code 5).** One dialog shows which programs hold the volume
+  open (a Samba worker means a file open over the network), what forcing ends, and
+  whether the share and dependents were put back; it offers Force with Cancel focused,
+  so Enter never forces (LIFE-5, changed 2026-11-27). For a volume mounted inside a
+  share it also warns that other containers and connections to that share can be hit.
+  Every confirmation callback checks its answer (`function (yes)`), so Cancel cannot
+  run the action whatever SweetAlert version Unraid ships.
 - **Edit dialog.** Name, display name, volume file, mount location, read-only, share
   (users, read-only, hidden), dependents (order, grace period, delay).
 - **Settings tab.** Force at array stop (LIFE-10), require HTTPS (UI-5), show on the

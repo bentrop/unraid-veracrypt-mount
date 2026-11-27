@@ -47,7 +47,7 @@ and is hard to change later).
 | `vcmount stop-dependents --all` | Stops the dependents of every mounted volume; the volumes stay mounted. Used by the `stopping_docker` hook. |
 | `--within <seconds>` (with `stop-dependents --all` and `dismount --all`) | The hooks pass the time they have. The engine shortens grace periods and the wait before ending programs to fit, and leaves what no longer fits (a dependent running, a volume mounted) to Unraid, with a log line. A stop signal (SIGTERM, SIGINT, SIGHUP) only asks: the volume being worked on is finished first. The hooks run the engine under `timeout -k 15`, and on "busy" send `cancel-unlock` once before trying again. The lock file is opened with close-on-exec, so a helper left running cannot keep it (audit S2). |
 | `vcmount start-dependents --all` | Starts the dependents of every mounted volume in list order. Used by the `docker_started` hook after Docker was switched off and on (LIFE-4). |
-| `vcmount cancel-unlock [--unlock-id <id>]` | Writes the marker `/var/run/vcmount/cancel` and nothing else; takes no lock. The marker holds the ID of the one unlock it is for: the page sends the ID it gave its own mount (16 to 64 hex characters, `--unlock-id`); without one (SSH, the array-stop hooks) the engine takes the ID of the running unlock from `/var/run/vcmount/unlocking`, and does nothing if none runs. A mount waiting for `cryptsetup` looks every half second and ends its own child only for its own ID (UI-8, review C3); a cancel written just before its mount took the lock is honoured, any other is removed. SIGINT, SIGTERM and SIGHUP end `cryptsetup` the same way. During the rest of a mount they are only noted (review C5): before the file system is mounted the volume is locked again and the mount ends as cancelled; after that, mount, share and dependents are finished (without the waits between dependents) and the engine then ends. `vcmount busy --json` adds `unlocking_for` (seconds since a running check started, or null) and `unlock_id`. |
+| `vcmount cancel-unlock [--unlock-id <id> \| --array-stop]` | Writes the marker `/var/run/vcmount/cancel` (with `--array-stop` also `/var/run/vcmount/stop`, see section 9a) and nothing else; takes no lock. The marker holds the ID of the one unlock it is for: the page sends the ID it gave its own mount (16 to 64 hex characters, `--unlock-id`); without one (SSH, the array-stop hooks) the engine takes the ID of the running unlock from `/var/run/vcmount/unlocking`, and does nothing if none runs. A mount waiting for `cryptsetup` looks every half second and ends its own child only for its own ID (UI-8, review C3); a cancel written just before its mount took the lock is honoured, any other is removed. SIGINT, SIGTERM and SIGHUP end `cryptsetup` the same way. During the rest of a mount they are only noted (review C5): before the file system is mounted the volume is locked again and the mount ends as cancelled; after that, mount, share and dependents are finished (without the waits between dependents) and the engine then ends. `vcmount busy --json` adds `unlocking_for` (seconds since a running check started, or null) and `unlock_id`. |
 | `vcmount repair-shares` | Makes the SMB shares match the mounted volumes: adds missing ones, removes left-over ones (section 9b). |
 | `vcmount options` | Lists the Unraid users and the Docker containers, for the web forms. Changes nothing. |
 | `vcmount config` | Shows the saved settings as stored, with their revision (a SHA-256 fingerprint of the file, or `none`). Changes nothing. |
@@ -181,13 +181,20 @@ My proposal: accept this for version 1 and do not try to rewrite ownership.
 ## 9. Dismount, step by step
 
 1. Take the lock.
-2. Remove the share (section 9b), so network clients let go, then stop the dependents
-   (section 9a).
-3. Dismount, plainly. Never "lazy", and not forced unless asked (LIFE-5).
-4. If the volume is busy: list which programs and which network clients hold it open,
-   stop with code 5. The volume stays mounted and usable. With `--force`, see 9a.
-5. Remove the empty mount point, then lock: `cryptsetup close vcm-<name>`.
-6. Write one log line.
+2. Without `--force`: if a Samba worker holds a **file** below the mount point open (a
+   document, a video), stop with code 5 before changing anything. Removing the share
+   would otherwise drop that file without asking (added 2026-11-27).
+3. Remove the share (section 9b), so network clients that only look into folders let
+   go, then stop the dependents (section 9a).
+4. Dismount, plainly. Never "lazy", and not forced unless asked (LIFE-5). The short
+   retries that wait for Samba's workers run only when a share was closed while Samba
+   runs (not at array stop, when Samba has stopped).
+5. If the volume is busy: list which programs hold it open, stop with code 5. The
+   volume stays mounted and usable; without force, its share is added again and its
+   dependents are started again (audit 2026-11-27c B2), except while the array or
+   Docker is being stopped. With `--force`, see 9a.
+6. Remove the empty mount point, then lock: `cryptsetup close vcm-<name>`.
+7. Write one log line.
 
 Dismount works from any state, so a volume left **unlocked** after a failure can be
 locked with the same command.
@@ -211,7 +218,9 @@ container that has not stopped by then. The engine reports and logs each kill.
 has failed:
 
 1. Programs on the server that hold the volume open get the stop signal and 10 seconds,
-   then are killed. The plain dismount is tried again.
+   then are killed. Programs inside a container are not killed one by one: their
+   container is stopped with `docker stop` (audit 2026-11-27c S3). The plain dismount
+   is tried again.
 2. If the volume then cannot be locked because a container that is not a dependent
    still has a folder of it, that container is stopped with `docker stop` (10 seconds,
    then killed) and locking is tried again.
@@ -220,7 +229,11 @@ has failed:
 `vcmount stop-dependents --all` and takes at most half of Unraid's shutdown time-out.
 `unmounting_disks` runs `vcmount dismount --all --array-stop` and takes at most a
 quarter. With `--array-stop` the dismount is forced unless the configuration file says
-`"settings": {"force_at_array_stop": false}`.
+`"settings": {"force_at_array_stop": false}`. When a hook finds another action
+running (code 6), it calls `vcmount cancel-unlock --array-stop` on every retry: that
+cancels a running unlock and writes the time to `/var/run/vcmount/stop`. The minute
+check and the dependents' start delays look at it every second and give way, so they
+cannot hold the lock through an array stop (audit 2026-11-27c S1).
 
 **Notifications (LIFE-9).** Faults go to Unraid's notifications as well as the system
 log, with the same text: a dependent that could not be started or stopped or was
@@ -332,7 +345,7 @@ plugin installs `/boot/config/plugins/veracrypt.mount/veracrypt.mount.cron` and 
    dismount's own message is logged and the next try waits a full idle time.
 
 Runtime files live in `/var/run/vcmount/` (mode 0700, checked to be a real folder owned by root, not a link, before every use; audit S12):
-`lock`, `cancel`, `unlocking`, `idle`, `idle-error`, `stray`.
+`lock`, `cancel`, `unlocking`, `idle`, `idle-error`, `stray`, `stop`.
 
 The state (device, counts, since when, notified) is kept in `/var/run/vcmount/idle`,
 in RAM, written and read like the other marker files (never through a link). `list
