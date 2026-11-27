@@ -443,9 +443,10 @@ Each item is a small test against a throwaway volume. The throwaway volumes are,
 3. Open a hidden volume. *Deferred (2026-11-15): lower priority for now.*
 4. Open with keyfiles, with PIM, and with both. *Deferred (2026-11-15): lower priority
    for now.*
-5. Ciphers and hashes other than AES and SHA-512, if the owner's real volumes use them.
-   *Not needed (2026-11-15): the real volumes use AES, SHA-512 with PBKDF2, NTFS and
-   passwords only.*
+5. Ciphers and hashes other than AES and SHA-512.
+   *Not needed as a separate test (2026-11-15): cryptsetup detects the cipher and hash by
+   itself; the TrueCrypt sample test (TC-1) later unlocked every hash and cipher
+   cascade in XTS mode.*
 6. A volume created with Argon2id: does cryptsetup 2.8.8 open it? *Deferred (2026-11-15): do it when the related part is built.*
 7. Behaviour with a dirty NTFS volume. *Deferred (2026-11-15): do it when the related part is built.*
 8. Unraid event names and their order on 7.4.

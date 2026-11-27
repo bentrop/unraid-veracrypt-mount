@@ -915,7 +915,7 @@ C2 (keep `settle`'s check behind the new message). C3 to C6 can wait or be docum
 - **B14 (2026-11-27, tested on Bob with file copies of two throwaway volumes):** XFS
   refuses a copy while its original is mounted ("duplicate UUID"), and the plugin
   wrongly advised `xfs_repair`; it now compares the ID with its own mounted XFS volumes
-  first and refuses with a clear message. Btrfs on Unraid 7.4 (kernel 6.12) mounts such
+  first and refuses with a clear message. Btrfs on Unraid 7.4 (kernel 6.18) mounts such
   a copy with a temporary ID of its own, so nothing is needed there. `blkid` now reads
   the device itself (`-p`), never its cache.
 
