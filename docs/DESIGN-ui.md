@@ -138,6 +138,16 @@ Following the mockups:
   Main page (UI-3).
 - **Dashboard tile.** One line per volume with its state and a Mount or Dismount
   button. Mount opens the same password dialog.
+- **Idle lock (LIFE-8, 2026-11-27).** Edit › Mount options: "Lock when idle", off by
+  default; ticked, it offers "after 15 minutes without reads or writes" (5 to 1440).
+  While it counts down: the Volumes tab shows "· locks in 12 min" after the name, Main
+  the same after the mount point, and the tile an hourglass in the status dot's place
+  and colour with "12m left". When the time is up but something holds the volume open:
+  "idle, held open", on the tile an orange hourglass with "held open". One function
+  words all three, so they cannot drift apart.
+- **Dependents that start by themselves (DOC-7, 2026-11-27).** Marked on their row with
+  Unraid's orange warning triangle and the reason ("autostart on", "restart policy");
+  one explanation below the list, and the triangle on the closed section's summary.
 - **Warnings shown at the top** when they apply: plain HTTP (UI-5), an activity-logging
   plugin is installed (PRIV-3), SMB is turned off while a volume should be shared.
 

@@ -11,7 +11,7 @@
 # describes exactly this package (build.py --check; builds are reproducible).
 #
 # Only GitHub's own tools are used: actions/checkout, pinned to a fixed commit,
-# and the gh command that GitHub's runners include.
+# and the php and gh commands that GitHub's runners include.
 
 name: Release
 
@@ -32,6 +32,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (Node.js 24)
         with:
           persist-credentials: false
+
+      - name: Check the engine and the PHP files for syntax errors
+        # Cron runs the engine with its output thrown away (idle lock), so a
+        # syntax error would go unnoticed on the server. Refuse it here.
+        run: |
+          set -e
+          dir=src/usr/local/emhttp/plugins/veracrypt.mount
+          for f in "$dir/scripts/vcmount" "$dir"/include/*.php; do php -l "$f"; done
 
       - name: Build the package and check it against the .plg
         run: python3 -I scripts/build.py --check "$GITHUB_REF_NAME"

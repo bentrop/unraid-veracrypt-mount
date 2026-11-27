@@ -53,6 +53,7 @@ and is hard to change later).
 | `vcmount config` | Shows the saved settings as stored, with their revision (a SHA-256 fingerprint of the file, or `none`). Changes nothing. |
 | `vcmount save-config [--revision <r>]` | Reads new settings as JSON on standard input, checks them with the same rules used when reading the file, and replaces the file in one step (Decision U1 in `docs/DESIGN-ui.md`). With `--revision` it refuses (code 3) when the file changed since it was read, so a change made in another browser tab is not overwritten unseen. It always refuses to rename or remove a volume that is mounted (decision D3, 2026-11-16). |
 | `vcmount busy` | Says whether another `vcmount` action is running. The web page uses it after a lost answer. |
+| `vcmount idle-check` | The idle lock (LIFE-8), run once a minute by cron (section 10a). |
 
 `vcmount mount ... --over-http` is what the web page sends when the password came over
 plain HTTP. It is refused (code 3) while the setting `require_https` is on (UI-5).
@@ -297,10 +298,47 @@ as the same file. If Samba is running but cannot be asked, the mount is refused 
 - **No header changes.** The engine only ever calls `cryptsetup` to open, close and show
   status (SEC-7).
 
+## 10a. Idle lock (LIFE-8, added 2026-11-27)
+
+A saved volume may carry `"idle_lock": <minutes>` (5 to 1440); without it the volume is
+never locked for being idle. Unraid's cron runs `vcmount idle-check` once a minute (the
+plugin installs `/boot/config/plugins/veracrypt.mount/veracrypt.mount.cron` and runs
+`update_cron`; removal takes it away again). Each run:
+
+1. Stops at once if no volume has an idle lock time, if the array is not started
+   (`mdState` in `var.ini`), or if another action holds the lock (it never waits).
+2. Reads, per mounted watched volume, the kernel's counts of completed reads and writes
+   (`/sys/block/dm-N/stat`, fields 1 and 5). If they changed since the last run, or the
+   volume was mounted anew (another `dm-N`), the idle time starts again. Every access
+   counts, from the share, a dependent or a program. Reads answered from Linux's memory
+   cache do not reach the device and are not counted; writes always arrive.
+3. When the time is up, looks for what would keep a dismount without force from working:
+   programs holding the volume open (`holders()`), except that a Samba process counts
+   only with a regular file open (Samba keeps every connected client inside the share's
+   folder, so a connected drive alone does not hold it), and containers using it that
+   are not its dependents. If there are any, the volume stays mounted, with one
+   notification until it is used again.
+4. Otherwise dismounts it as `vcmount dismount` does (share, dependents in reverse,
+   unmount, lock), never forced, and sends a normal notification. If that fails, the
+   dismount's own message is logged and the next try waits a full idle time.
+
+The state (device, counts, since when, notified) is kept in `/var/run/vcmount.idle`,
+in RAM, written and read like the other marker files (never through a link). `list
+--json` adds per volume `idle_lock`, `locks_in` (whole minutes left as the last check
+saw it, null if not watched yet) and `idle_blocked`; whole minutes, so the pages, which
+draw again only on a change, are not redrawn every few seconds.
+
+Cron sends the check's output nowhere, so a failure would go unnoticed and volumes
+would quietly stay mounted. The first failure is logged and sent as an alert, later
+ones are not while `/var/run/vcmount.idle-error` exists, and the first run that works
+again says so and removes it. "Busy" is not a failure. A syntax error in the engine
+itself cannot be reported this way; the release workflow refuses those (`php -l`),
+as `scripts/deployweb.sh` does for the fast loop.
+
 ## 11. Not in this note
 
 Designed when their step comes: automount with
-a keyfile, idle auto-lock, notifications, hidden-volume and PIM details, opening the file
+a keyfile, notifications, hidden-volume and PIM details, opening the file
 by its disk path (VOL-8).
 
 ## 12. Decisions (all agreed 2026-11-15)

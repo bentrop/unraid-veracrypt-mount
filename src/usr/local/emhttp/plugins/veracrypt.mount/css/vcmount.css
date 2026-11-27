@@ -75,6 +75,9 @@
 .vcm-dep-add input[type=button] { margin: 0; flex: none; }
 .vcm-optlist .vcm-sub { margin: -2px 0 2px 24px; }
 .vcm-optlist .vcm-sub[hidden] { display: none; }
+#e-idle-min { width: 4.5em; }
+.vcm-idle { white-space: nowrap; cursor: help; }
+#e-idle-box .vcm-note { display: block; }
 /* A label that lines up with the first line of a taller field (the keyfiles). */
 .vcm-form dt.vcm-first-line, .vcm-form dd.vcm-first-line { align-self: baseline; }
 .vcm-keyfile { display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; max-width: 420px; margin-bottom: 4px; }

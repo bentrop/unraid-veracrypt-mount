@@ -150,7 +150,7 @@
                 ? '<a href="/Settings/VeraCryptMount?edit=' + encodeURIComponent(v.name) + '" title="' + esc(v.display_name) + ' settings">' + esc(v.display_name) + '</a>'
                 : '<span title="' + esc(v.display_name) + ', not saved">' + esc(v.display_name) + '</span>';
             var orb = v.state === 'mounted' ? 'green' : (locked ? 'grey' : 'yellow');
-            var state = '<i class="fa fa-circle orb ' + orb + '-orb middle"></i>' + esc(v.state) +
+            var state = tileState(v, orb) +
                         (v.read_only && v.state === 'mounted' ? ' <span class="vcm-ro" title="Mounted read-only">ro</span>' : '');
             var usage = '<span class="load">-</span><div class="usage-disk sys none"><span></span></div>';
             if (v.state === 'mounted' && v.size_bytes > 0) {
@@ -260,7 +260,7 @@
         return '<tr>' +
             '<td>' + rowStart(v, label) + '</td>' +
             '<td>' + infoIcon(v.name) + esc(v.file || '-') + '</td>' +
-            '<td colspan="3">' + esc(v.mounted_at || '-') + '</td>' +
+            '<td colspan="3">' + esc(v.mounted_at || '-') + idleHint(v) + '</td>' +
             '<td>' + tileShare(v) + '</td>' +
             '<td>' + esc(mountedNow && v.filesystem ? v.filesystem : '-') + '</td>' +
             sizes + '</tr>';
@@ -311,6 +311,43 @@
     }
 
     /**
+     * LIFE-8: how soon a mounted volume is locked when idle, as the last check
+     * saw it. Long form for the Volumes tab and Main, short for the tile.
+     */
+    function idleText(v, short) {
+        if (v.state !== 'mounted' || !v.idle_lock || v.locks_in === null || v.locks_in === undefined) { return ''; }
+        if (v.idle_blocked) { return short ? 'held open' : 'idle, held open'; }
+        if (v.locks_in <= 1) { return short ? '1m left' : 'locks soon'; }
+        return short ? v.locks_in + 'm left' : 'locks in ' + v.locks_in + ' min';
+    }
+
+    function idleTitle(v) {
+        return 'Locked after ' + v.idle_lock + ' minutes without reads or writes' +
+               (v.idle_blocked ? '; something still holds it open' : '');
+    }
+
+    function idleHint(v) {
+        var text = idleText(v, false);
+        return text ? ' <span class="vcm-dim" title="' + esc(idleTitle(v)) + '">· ' + esc(text) + '</span>' : '';
+    }
+
+    /**
+     * The tile's status: Unraid's dot and the state. Its column is narrow, so
+     * while the idle lock counts down, an hourglass in the dot's place and
+     * colour (orange when something holds the volume open) and the time left
+     * stand for "mounted"; the full text is in the tooltip.
+     */
+    function tileState(v, orb) {
+        var text = idleText(v, true);
+        if (!text) {
+            return '<i class="fa fa-circle orb ' + orb + '-orb middle"></i>' + esc(v.state);
+        }
+        return '<span class="vcm-idle" title="' + esc('Mounted, ' + idleText(v, false) + '. ' + idleTitle(v)) + '">' +
+               '<i class="fa fa-hourglass-half orb ' + (v.idle_blocked ? 'yellow' : 'green') + '-orb middle"></i>' +
+               esc(text) + '</span>';
+    }
+
+    /**
      * One row of the Volumes tab: two lines per cell, so the facts fit without
      * a column for each. The buttons say plainly what they do; the lock works
      * too, as on the tile and the Main page.
@@ -323,7 +360,8 @@
         // text that is cut short with "…", so the lock's help bubble is never cut off.
         var label = esc(v.display_name) +
                     (v.saved ? '' : ' <span class="vcm-dim">(not saved)</span>') +
-                    (v.read_only && mountedNow ? ' <span class="vcm-ro" title="Mounted read-only">ro</span>' : '');
+                    (v.read_only && mountedNow ? ' <span class="vcm-ro" title="Mounted read-only">ro</span>' : '') +
+                    idleHint(v);
         var where = esc(v.file || '?') + ' &rarr; ' + esc(v.mounted_at || v.mount_at || '-');
         var deps = v.dependents || [];
         var buttons = '';
@@ -1197,7 +1235,8 @@
         if (kf) { unlock.push(kf === 1 ? '1 keyfile' : kf + ' keyfiles'); }
         if ($('#e-pim').is(':checked')) { unlock.push('PIM'); }
         if ($('#e-ro').is(':checked')) { unlock.push('read-only'); }
-        $('#s-unlock').text(unlock.join(', ') + ($('#e-hidden').is(':checked') ? ' · hidden volume' : ''));
+        $('#s-unlock').text(unlock.join(', ') + ($('#e-hidden').is(':checked') ? ' · hidden volume' : '') +
+                            ($('#e-idle').is(':checked') ? ' · locks after ' + $('#e-idle-min').val() + ' min idle' : ''));
         var deps = $('#e-deps li').map(function () { return $(this).attr('data-container'); }).get();
         $('#s-deps').text(deps.length ? deps.join(', ') : 'none');
         // Seen also while the section is closed (DOC-7).
@@ -1261,6 +1300,7 @@
         $('.vcm-share-on').toggle($('#e-share').val() === 'yes');
         $('.vcm-mount-share').toggle($('#e-mount-mode').val() === 'share');
         $('#e-keyfiles-box').prop('hidden', !$('#e-use-keyfiles').is(':checked'));
+        $('#e-idle-box').prop('hidden', !$('#e-idle').is(':checked'));
         var name = $.trim($('#e-name').val());
         $('#e-own-point').text(name ? '/mnt/addons/' + name : '');
         updateSummaries();
@@ -1336,6 +1376,9 @@
             $('#e-ro').prop('checked', !!v.read_only);
             $('#e-pim').prop('checked', !!v.pim);
             $('#e-hidden').prop('checked', !!v.hidden);
+            // LIFE-8: off unless saved; ticking it offers 15 minutes.
+            $('#e-idle').prop('checked', !!v.idle_lock);
+            $('#e-idle-min').val(v.idle_lock || 15);
             $('#e-keyfiles').empty();
             $('#e-use-keyfiles').prop('checked', (v.keyfiles || []).length > 0);
             ((v.keyfiles || []).length ? v.keyfiles : ['']).forEach(function (p) { addKeyfileRow(p); });
@@ -1393,6 +1436,7 @@
         if ($('#e-ro').is(':checked')) { v.read_only = true; }
         if ($('#e-hidden').is(':checked')) { v.hidden = true; }
         if ($('#e-pim').is(':checked')) { v.pim = true; }
+        if ($('#e-idle').is(':checked')) { v.idle_lock = parseInt($('#e-idle-min').val(), 10); }
         var keyfiles = editKeyfiles();
         if (keyfiles.length) { v.keyfiles = keyfiles; }
         if ($('#e-share').val() === 'yes') {
@@ -1423,6 +1467,9 @@
             return 'Choose a folder inside a share: its path starts with /mnt/user/.';
         }
         if ((v.keyfiles || []).some(function (k) { return k.indexOf('/mnt/') !== 0; })) { return 'A keyfile must be a file under /mnt/.'; }
+        if (v.idle_lock !== undefined && !(v.idle_lock >= 5 && v.idle_lock <= 1440)) {
+            return 'Lock when idle: choose 5 to 1440 minutes.';
+        }
         if ((v.keyfiles || []).indexOf(v.file) >= 0) { return 'The volume file cannot be its own keyfile.'; }
         if (v.share && !Object.keys(v.share.users).length) { return 'Give at least one user access to the share, or turn sharing off.'; }
         var bad = (v.dependents || []).some(function (d) {

@@ -241,12 +241,18 @@ Nothing needs to be installed on the server.
   user dismounts first and then repeats the update or removal.
 - **LIFE-7 (Agreed)** State is read from the live system (device mapper, mount table),
   not from files, so it survives plugin updates and is correct after a crash.
-- **LIFE-8 (Agreed)** Optional idle auto-lock per volume, default off.
-  Idea for when this is built (2026-11-16, not yet a requirement): take "in use" from
-  the kernel's read and write counters of the unlocked volume
-  (`/sys/block/dm-N/stat`). The same counters could then give the Main page section
-  Reads and Writes columns like Unraid's device tables; the section's title would
-  then stop opting out of Unraid's "Toggle reads/writes display" icon.
+- **LIFE-8 (Agreed, built 2026-11-27)** Optional idle auto-lock per volume, default off.
+  Built as agreed on 2026-11-27: a checkbox "Lock when idle" with 15 minutes offered
+  (5 to 1440); "idle" means the kernel's read and write counters of the unlocked volume
+  (`/sys/block/dm-N/stat`) did not change; checked once a minute by cron; the lock is a
+  normal dismount (dependents first, their activity counts), never forced; a file still
+  open keeps the volume mounted, with one notification; every auto-lock is notified. A
+  countdown shows on the Volumes tab, Main and the tile. Design: DESIGN-engine section
+  10a. Tested on Bob: idle volume locked; activity resets the time; an open Word
+  document keeps it mounted until closed.
+  Later (2026-11-27, back burner): the same counters could give the Main page section
+  Reads and Writes columns like Unraid's device tables; the mount point would then need
+  a new place.
 - **LIFE-9 (Agreed)** Unraid notifications for failed mounts, aborted dismounts,
   auto-locks and stopped dependents.
 

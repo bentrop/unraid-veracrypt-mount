@@ -81,6 +81,13 @@ const CANCEL_POLL = 500000;    // microseconds between looks for CANCEL_FILE
 // Holds the start time of the password check while cryptsetup runs, so "busy"
 // can tell a waiting page that an unlock is under way. Only a time, no name.
 const UNLOCKING_FILE = '/var/run/vcmount.unlocking';
+// Idle lock (LIFE-8): per watched volume, its kernel device, the read and write
+// counters last seen and since when they have not changed. In RAM only.
+const IDLE_FILE = '/var/run/vcmount.idle';
+const IDLE_MIN = 5;            // minutes, the shortest idle lock time
+const IDLE_MAX = 1440;         // minutes, one day
+// Exists while the idle check fails, so the failure is reported once only.
+const IDLE_ERROR_FILE = '/var/run/vcmount.idle-error';
 
 // Time limits in seconds, so the engine can never hang forever.
 const UNLOCK_TIMEOUT = 180;    // cryptsetup checking a password (slow on purpose)
@@ -109,6 +116,8 @@ Usage:
   vcmount repair-shares                      make the SMB shares match the mounted volumes
   vcmount options                            list the users and containers the forms offer
   vcmount busy                               say whether another vcmount action is running
+  vcmount idle-check                         lock the volumes that were idle for their set
+                                             time (run every minute by cron); never forced
   vcmount info <name>                        details of one volume: file, encryption,
                                              filesystem, share, dependents, recent log
   vcmount fix-top <name>                     make the top folder of a mounted ext4, XFS or
@@ -222,6 +231,12 @@ function check_config($data, string $source): array
             throw new Fail("The volume \"$name\" has a display name or mount location that is not valid.", CODE_USAGE);
         }
 
+        $idle = $entry['idle_lock'] ?? null;
+        if ($idle !== null && (!is_int($idle) || $idle < IDLE_MIN || $idle > IDLE_MAX)) {
+            throw new Fail("The volume \"$name\" has an idle lock time that is not valid (" . IDLE_MIN
+                . ' to ' . IDLE_MAX . ' minutes).', CODE_USAGE);
+        }
+
         $volumes[$name] = [
             'name' => $name,
             'display_name' => is_string($display) && $display !== '' ? $display : $name,
@@ -233,6 +248,7 @@ function check_config($data, string $source): array
             'keyfiles' => read_keyfiles($name, $entry['keyfiles'] ?? []),
             'dependents' => read_dependents($name, $entry['dependents'] ?? []),
             'share' => read_share($name, $entry['share'] ?? null),
+            'idle_lock' => $idle,
         ];
     }
     return ['volumes' => $volumes, 'settings' => $settings];
@@ -484,7 +500,13 @@ function describe(string $name, ?array $saved, ?array $live): array
         'hidden' => $saved['hidden'] ?? false,
         'dependents' => array_column($saved['dependents'] ?? [], 'container'),
         'share_active' => share_active($name),
-    ];
+        // LIFE-8: the idle lock time in minutes (null when off) and, for a
+        // mounted volume, as the last idle check saw it: the whole minutes
+        // left (null if not looked at yet) and whether something still holds
+        // it although its time is up. Minutes, so the list changes only once
+        // a minute and the pages are not drawn again every few seconds.
+        'idle_lock' => $saved['idle_lock'] ?? null,
+    ] + idle_view($name, $state === 'mounted' ? ($saved['idle_lock'] ?? null) : null);
 }
 
 /** All volumes: the saved ones first, then anything mounted without saving. */
@@ -605,7 +627,7 @@ function report(bool $json, string $name, string $text, array $notes = []): void
  * Write one line to the system log. Events only: never a password, never a
  * file name from inside a volume. Callers do not log volumes that are not saved.
  */
-function log_event(string $message, bool $notify = false): void
+function log_event(string $message, bool $notify = false, string $level = 'warning'): void
 {
     // Unless the setting "Show volume names in logs" is on, every name is left
     // out. Messages put every volume and container name in double quotes, so
@@ -627,7 +649,7 @@ function log_event(string $message, bool $notify = false): void
     // Faults also go to Unraid's notifications (LIFE-9), with the same text.
     if ($notify && is_executable(NOTIFY_SCRIPT)) {
         try {
-            run([NOTIFY_SCRIPT, '-e', 'VeraCrypt Mount', '-s', 'VeraCrypt Mount', '-d', $message, '-i', 'warning'], 20);
+            run([NOTIFY_SCRIPT, '-e', 'VeraCrypt Mount', '-s', 'VeraCrypt Mount', '-d', $message, '-i', $level], 20);
         } catch (Fail $e) {
             // A notification that cannot be sent must not stop a dismount.
         }
@@ -2466,6 +2488,207 @@ function read_marker(string $path): ?string
     return $text === false ? null : $text;
 }
 
+/** The idle state as the last idle check wrote it: name => dm, io, since, warned. */
+function idle_state(): array
+{
+    $data = json_decode((string) read_marker(IDLE_FILE), true);
+    $state = [];
+    foreach (is_array($data) ? $data : [] as $name => $entry) {
+        if (is_string($name) && preg_match(NAME_PATTERN, $name) && is_array($entry)
+            && is_string($entry['dm'] ?? null) && is_string($entry['io'] ?? null)
+            && is_int($entry['since'] ?? null)) {
+            $state[$name] = ['dm' => $entry['dm'], 'io' => $entry['io'], 'since' => $entry['since'],
+                             'warned' => !empty($entry['warned'])];
+        }
+    }
+    return $state;
+}
+
+/** For the list: minutes left until a mounted volume is locked when idle. */
+function idle_view(string $name, ?int $minutes): array
+{
+    $entry = $minutes === null ? null : (idle_state()[$name] ?? null);
+    if ($entry === null) {
+        return ['locks_in' => null, 'idle_blocked' => false];
+    }
+    $idle = intdiv(max(0, time() - $entry['since']), 60);
+    return ['locks_in' => max(0, $minutes - $idle), 'idle_blocked' => $entry['warned']];
+}
+
+/**
+ * The kernel's count of completed reads and writes of a device
+ * (/sys/block/dm-N/stat, fields 1 and 5), or null if it cannot be read.
+ */
+function io_count(string $dm): ?string
+{
+    $fields = preg_split('/\s+/', trim((string) @file_get_contents("/sys/block/$dm/stat")));
+    if (count($fields) < 5 || !preg_match('/\A[0-9]+\z/', $fields[0] . $fields[4])) {
+        return null;
+    }
+    return $fields[0] . ' ' . $fields[4];
+}
+
+/** Does this process have a regular file open below the folder? */
+function open_file_below(int $pid, string $point): bool
+{
+    $fds = glob("/proc/$pid/fd/*");
+    foreach ($fds === false ? [] : $fds as $fd) {
+        $target = @readlink($fd);
+        if ($target !== false && below($target, $point) && is_file($target)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * What keeps an idle volume from being locked without force: programs that
+ * hold it open, and containers using it that are not its dependents (those are
+ * stopped). Samba keeps every connected client inside the share's folder, so a
+ * Samba process counts only with a file open; a connected drive with no open
+ * file does not keep the volume.
+ */
+function idle_blockers(array $volume, string $point, string $dm): array
+{
+    $blockers = [];
+    foreach (holders($point) as $holder) {
+        $comm = trim((string) @file_get_contents('/proc/' . $holder['pid'] . '/comm'));
+        if (strncmp($comm, 'smbd', 4) === 0 && !open_file_below($holder['pid'], $point)) {
+            continue;
+        }
+        $blockers[] = $holder['label'];
+    }
+    $device_number = trim((string) @file_get_contents("/sys/block/$dm/dev"));
+    if ($device_number !== '') {
+        $dependents = array_column($volume['dependents'], 'container');
+        foreach (mount_users($device_number)['containers'] as $label) {
+            if (!in_array(substr($label, strlen('container ')), $dependents, true)) {
+                $blockers[] = $label;
+            }
+        }
+    }
+    return $blockers;
+}
+
+/** Is Unraid's array started? Volumes are only locked when idle while it is. */
+function array_started(): bool
+{
+    $ini = @parse_ini_file('/var/local/emhttp/var.ini');
+    return is_array($ini) && ($ini['mdState'] ?? '') === 'STARTED';
+}
+
+/**
+ * Idle lock (LIFE-8), run every minute by cron. For each mounted saved volume
+ * with an idle lock time: if its read and write counters have not changed for
+ * that long, dismount and lock it as a normal dismount does (dependents first),
+ * never forced. A volume still in use stays mounted, with one notification
+ * until it is used again. Does nothing while another action runs.
+ */
+function command_idle_check(array $args, bool $json): int
+{
+    if ($args !== []) {
+        throw new Fail('Usage: vcmount idle-check', CODE_USAGE);
+    }
+    $watched = array_filter(load_config(), fn($v) => $v['idle_lock'] !== null);
+    if ($watched === [] || !array_started()) {
+        if ($watched === [] && read_marker(IDLE_FILE) !== null) {
+            @unlink(IDLE_FILE);
+        }
+        if ($json) {
+            echo json_encode(['ok' => true, 'locked' => []]), "\n";
+        }
+        return CODE_OK;
+    }
+    try {
+        $lock = take_lock();
+    } catch (Fail $e) {
+        if ($e->getCode() !== CODE_IN_PROGRESS) {
+            throw $e;
+        }
+        if ($json) {
+            echo json_encode(['ok' => true, 'locked' => [], 'busy' => true]), "\n";
+        }
+        return CODE_OK;   // another action runs; look again in a minute
+    }
+
+    $live = live_volumes();
+    $old = idle_state();
+    $state = [];
+    $locked = [];
+    $now = time();
+    foreach ($watched as $name => $volume) {
+        $name = (string) $name;
+        $vol = $live[$name] ?? null;
+        $dm = dm_name(MAPPER_DIR . '/' . MAPPER_PREFIX . $name);
+        $io = $dm === null ? null : io_count($dm);
+        if ($vol === null || $vol['mounted_at'] === null || $io === null) {
+            continue;
+        }
+        $entry = $old[$name] ?? null;
+        if ($entry === null || $entry['dm'] !== $dm || $entry['io'] !== $io) {
+            // Newly mounted, or used since the last look: the time starts again.
+            $state[$name] = ['dm' => $dm, 'io' => $io, 'since' => $now, 'warned' => false];
+            continue;
+        }
+        $state[$name] = $entry;
+        if ($now - $entry['since'] < $volume['idle_lock'] * 60) {
+            continue;
+        }
+        $blockers = idle_blockers($volume, $vol['mounted_at'], $dm);
+        if ($blockers !== []) {
+            if (!$entry['warned']) {
+                log_event("\"$name\" was idle for {$volume['idle_lock']} minutes but is not locked: still in use by "
+                    . quoted_list($blockers), true);
+                $state[$name]['warned'] = true;
+            }
+            continue;
+        }
+        try {
+            do_dismount($name, $volume, $vol, false);
+            unset($state[$name]);
+            $locked[] = $name;
+            log_event("\"$name\" was locked after {$volume['idle_lock']} minutes without reads or writes", true, 'normal');
+        } catch (Fail $e) {
+            // do_dismount has logged and reported it. Wait a full idle time
+            // before the next try, so a failure is not repeated every minute.
+            $state[$name] = ['dm' => $dm, 'io' => $io, 'since' => $now, 'warned' => true];
+        }
+    }
+    if ($state === []) {
+        @unlink(IDLE_FILE);
+    } else {
+        write_marker(IDLE_FILE, json_encode($state));
+    }
+    if ($json) {
+        echo json_encode(['ok' => true, 'locked' => $locked]), "\n";
+    }
+    return CODE_OK;
+}
+
+/**
+ * The idle check as cron runs it. Its output goes nowhere, so a failure would
+ * go unnoticed and volumes would silently stay mounted. Report the first
+ * failure in the log and as an alert, stay quiet while it keeps failing, and
+ * say when it works again.
+ */
+function idle_check_reported(array $args, bool $json): int
+{
+    try {
+        $code = command_idle_check($args, $json);
+    } catch (Throwable $e) {
+        if (read_marker(IDLE_ERROR_FILE) === null) {
+            write_marker(IDLE_ERROR_FILE, (string) time());
+            log_event('the idle check failed, so no volume is locked when idle: ' . $e->getMessage(), true, 'alert');
+        }
+        throw $e instanceof Fail ? $e : new Fail('The idle check failed: ' . $e->getMessage(), CODE_USAGE);
+    }
+    if (read_marker(IDLE_ERROR_FILE) !== null) {
+        @unlink(IDLE_ERROR_FILE);
+        log_event('the idle check works again', true, 'normal');
+    }
+    return $code;
+}
+
 /**
  * Ask a running unlock to stop (UI-8). Only leaves a marker; the mount that is
  * waiting for cryptsetup ends its own child. Takes no lock, since the mount
@@ -2845,6 +3068,9 @@ function volume_for_file(array $v): array
     if ($v['dependents'] !== []) {
         $out['dependents'] = $v['dependents'];
     }
+    if ($v['idle_lock'] !== null) {
+        $out['idle_lock'] = $v['idle_lock'];
+    }
     return $out;
 }
 
@@ -2987,6 +3213,8 @@ function main(array $argv): int
                 return command_options($args, $json);
             case 'busy':
                 return command_busy($args, $json);
+            case 'idle-check':
+                return idle_check_reported($args, $json);
             case 'cancel-unlock':
                 return command_cancel_unlock($args, $json);
             case 'privacy':
