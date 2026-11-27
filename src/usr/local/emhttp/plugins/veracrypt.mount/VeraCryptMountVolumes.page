@@ -174,7 +174,7 @@ $vcm = '/plugins/veracrypt.mount';
     </details>
 
     <p id="vcm-edit-error" class="vcm-error" hidden></p>
-    <p class="vcm-note">Changes to a mounted volume take effect at its next mount.</p>
+    <p class="vcm-note">For a mounted volume, a changed share and idle lock apply at once, changed dependents from its next dismount, and everything else at its next mount.</p>
     <div class="vcm-buttons">
       <input type="button" id="e-add" class="lock" value="Add Volume">
       <input type="button" id="e-apply" class="lock" value="Apply" disabled>

@@ -186,12 +186,24 @@ function config_path(): string
  */
 function setting(string $key, bool $default): bool
 {
-    // A setting that is not yes or no gives the default, so a fault in the
-    // file never blocks the array-stop hook.
+    return all_settings([$key => $default])[$key];
+}
+
+/**
+ * Several settings from one read of the file ($defaults: key => default). A
+ * setting that is not yes or no gives the default, so a fault in the file
+ * never blocks the array-stop hook.
+ */
+function all_settings(array $defaults = SETTINGS): array
+{
     $data = json_decode((string) @file_get_contents(config_path()), true);
     $given = is_array($data) ? ($data['settings'] ?? null) : null;
-    $value = is_array($given) ? ($given[$key] ?? null) : null;
-    return is_bool($value) ? $value : $default;
+    $out = [];
+    foreach ($defaults as $key => $default) {
+        $value = is_array($given) ? ($given[$key] ?? null) : null;
+        $out[$key] = is_bool($value) ? $value : $default;
+    }
+    return $out;
 }
 
 function load_config(): array
@@ -565,11 +577,16 @@ function command_list(bool $json): int
 {
     $volumes = all_volumes();
     if ($json) {
-        $settings = [];
-        foreach (SETTINGS as $key => $default) {
-            $settings[$key] = setting($key, $default);
-        }
-        echo json_encode(['ok' => true, 'volumes' => $volumes, 'settings' => $settings], JSON_UNESCAPED_SLASHES), "\n";
+        // For the pages: the server's network name for share paths, and
+        // Unraid's HTTPS port for the "open over HTTPS" link (audit
+        // 2026-11-27c B7).
+        $vars = @parse_ini_file(UNRAID_VARS);
+        $vars = is_array($vars) ? $vars : [];
+        $port = (int) ($vars['PORTSSL'] ?? 443);
+        echo json_encode(['ok' => true, 'volumes' => $volumes, 'settings' => all_settings(),
+                          'server' => ['name' => (string) ($vars['NAME'] ?? php_uname('n')),
+                                       'https_port' => $port > 0 && $port < 65536 ? $port : 443]],
+                         JSON_UNESCAPED_SLASHES), "\n";
         return CODE_OK;
     }
     if ($volumes === []) {
@@ -1999,6 +2016,11 @@ function program_label(string $proc_dir): string
 {
     // A program chooses its own name: keep only plain characters (audit S6).
     $comm = preg_replace('/[^A-Za-z0-9 ._+:@\/-]/', '?', trim((string) @file_get_contents("$proc_dir/comm")));
+    // Samba names each worker after its client, such as "smbd[2003:dd:6f":
+    // not shown, and not logged (owner's test, 2026-11-27).
+    if (strncmp($comm, 'smbd', 4) === 0) {
+        $comm = 'Samba';
+    }
     return $comm . ' (process ' . basename($proc_dir) . ')';
 }
 
@@ -2221,9 +2243,13 @@ function end_programs(array $holders): array
             return $started[$pid] !== null && process_start($pid) === $started[$pid];
         }));
     };
+    // Only what is still running is ended and reported (audit 2026-11-27c B7).
+    $labels = array_values(array_intersect_key($labels, array_flip(array_keys(array_filter(
+        $pids, fn($pid) => $alive([$pid]) !== []
+    )))));
     $pids = $alive($pids);
     if ($pids === []) {
-        return $labels;
+        return [];
     }
     run(array_merge([program('kill'), '-TERM'], $pids), TOOL_TIMEOUT);
     $wait = fitting(FORCE_WAIT, 5);
@@ -2256,6 +2282,34 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
     $mapper = MAPPER_PREFIX . $name;
     $dm = dm_name(MAPPER_DIR . '/' . $mapper);
     $device_number = $dm === null ? '' : trim((string) @file_get_contents("/sys/block/$dm/dev"));
+
+    // A file open over the network (a document in Word, a video playing) is
+    // use, as for VeraCrypt on Windows: without force nothing is changed, not
+    // even the share, whose removal would drop that file (owner's test,
+    // 2026-11-27). Samba's mere looks into folders do not count.
+    if (!$force && ($live['mounted_at'] ?? null) !== null) {
+        $point = $live['mounted_at'];
+        $remote = [];
+        foreach (holders($point) as $holder) {
+            $comm = trim((string) @file_get_contents('/proc/' . $holder['pid'] . '/comm'));
+            if (strncmp($comm, 'smbd', 4) === 0 && open_file_below($holder['pid'], $point)) {
+                $remote[] = $holder['label'];
+            }
+        }
+        if ($remote !== []) {
+            $fail = new Fail(
+                "Dismount aborted: \"$name\" is still in use: a file on it is open over the network. "
+                . 'It stays mounted; nothing was forced. Close the file on the other computer, or force the dismount.',
+                CODE_BUSY
+            );
+            $fail->details = ['programs' => array_map(fn($l) => "$l, a file open over the network", $remote),
+                              'restored' => ''];
+            if ($saved) {
+                log_event("dismount of \"$name\" aborted: a file is open over the network", true);
+            }
+            throw $fail;
+        }
+    }
 
     // First the share, so network clients let go of the volume (section 9b).
     // Only then is waiting for Samba's workers worth it below (audit
@@ -2305,18 +2359,24 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
             if ($containers !== []) {
                 $notes = array_merge($notes, force_stop_containers($containers, $name, $saved));
             }
-            if ($ended !== [] || $containers !== []) {
-                $r = run([program('umount'), $point], TOOL_TIMEOUT);
-            }
+            // Also when they had ended by themselves meanwhile.
+            $r = run([program('umount'), $point], TOOL_TIMEOUT);
         }
         if ($r['code'] !== 0) {
+            // Not forced and still in use: the volume stays mounted, so give it
+            // back its share and dependents (audit 2026-11-27c B2), except while
+            // the array or Docker is being stopped.
+            $back = '';
+            if (!$force && $saved && !stop_requested() && array_started()) {
+                $back = restore_after_busy($name, $volume, $point, !empty($live['read_only']));
+            }
             $fail = new Fail(
                 "Dismount aborted: \"$name\" is still in use. It stays mounted"
-                . ($force ? ", although force was used.\n" : "; nothing was forced.\n") . trim($r['err']),
+                . ($force ? ", although force was used.\n" : "; nothing was forced.\n") . trim($r['err']) . $back,
                 CODE_BUSY
             );
             $programs = array_column(holders($point), 'label');
-            $fail->details = ['programs' => $programs];
+            $fail->details = ['programs' => $programs, 'restored' => trim($back)];
             if ($saved) {
                 // Program names and process numbers only, never file names.
                 log_event(
@@ -2361,6 +2421,29 @@ function do_dismount(string $name, ?array $volume, ?array $live, bool $force): a
     }
     clear_idle_entry($name);
     return $notes;
+}
+
+/**
+ * After a dismount that stopped because the volume is in use: add its share
+ * again and start its dependents again, as they were before (audit
+ * 2026-11-27c B2). Returns a sentence for the message, or ''.
+ */
+function restore_after_busy(string $name, array $volume, string $point, bool $read_only): string
+{
+    $done = [];
+    if ($volume['share'] !== null) {
+        try {
+            add_share($name, $volume['share'], $point, $volume['read_only'] || $read_only);
+            $done[] = 'its share was added again';
+        } catch (Fail $e) {
+            $done[] = 'its share could not be added again (' . $e->getMessage() . ')';
+        }
+    }
+    if ($volume['dependents'] !== []) {
+        $done[] = start_dependents($name, $volume['dependents']) === []
+            ? 'its dependents were started again' : 'not every dependent could be started again';
+    }
+    return $done === [] ? '' : "\n" . ucfirst(implode('; ', $done)) . '.';
 }
 
 /**
@@ -3123,8 +3206,9 @@ function command_idle_check(array $args, bool $json, array $extra = []): int
             log_event("\"$name\" was locked after {$volume['idle_lock']} minutes without reads or writes", true, 'normal');
         } catch (Fail $e) {
             // do_dismount has logged and reported it. Wait a full idle time
-            // before the next try, so a failure is not repeated every minute.
-            $state[$name] = ['dm' => $dm, 'io' => $io, 'since' => time(), 'warned' => true];
+            // before the next try, so a failure is not repeated every minute;
+            // the pages show that countdown, not "held open" (audit 2026-11-27c B2).
+            $state[$name] = ['dm' => $dm, 'io' => io_count($dm) ?? $io, 'since' => time(), 'warned' => false];
         }
     }
     if ($state === []) {
@@ -3614,7 +3698,10 @@ function volume_log_lines(string $name): array
     // digits, - and _, so this cannot match a longer name by accident.
     $needle = '"' . $name . '"';
     while (($line = fgets($handle)) !== false) {
-        if (strpos($line, 'veracrypt.mount') !== false && strpos($line, $needle) !== false) {
+        // Not the lines about a container that happens to share the
+        // volume's name (audit 2026-11-27c B7).
+        if (strpos($line, 'veracrypt.mount') !== false && strpos($line, $needle) !== false
+            && strpos($line, 'dependent ' . $needle) === false && strpos($line, 'container ' . $needle) === false) {
             $lines[] = rtrim($line, "\n");
             if (count($lines) > INFO_LOG_LINES) {
                 array_shift($lines);

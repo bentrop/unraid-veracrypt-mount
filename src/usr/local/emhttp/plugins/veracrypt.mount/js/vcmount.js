@@ -25,6 +25,7 @@
     var httpsRequired = null;    // the setting "require HTTPS", from the list; null = not known yet
 
     var lastVolumes = [];        // the list as last shown
+    var server = null;           // the server's network name and HTTPS port, from the list
     var lastTile = null;         // the tile's list as last drawn, to leave it alone when nothing changed
     var mountTarget = null;      // the volume the dialog is for; null = mount once
     var mounting = false;        // a mount request is on its way; a second click is ignored
@@ -176,6 +177,11 @@
         return v.state === 'mounted' && v.size_bytes > 0 && v.free_bytes !== null && v.free_bytes !== undefined;
     }
 
+    /** The server's network name for share paths (audit 2026-11-27c B7). */
+    function smbName() {
+        return ((server && server.name) || window.location.hostname).toUpperCase();
+    }
+
     /** Used space in percent, kept between 0 and 100 (audit B16). */
     function usedPercent(v) {
         var p = Math.round(100 * (v.size_bytes - v.free_bytes) / v.size_bytes);
@@ -210,7 +216,7 @@
         var inside = point.indexOf('/mnt/user/') === 0 ? point.split('/')[3] : '';
         var via = inside ? ' Also reachable through the Unraid share "' + inside + '".' : '';
         if (v.share) {
-            var path = '\\\\' + window.location.hostname.toUpperCase() + '\\' + v.name;
+            var path = '\\\\' + smbName() + '\\' + v.name;
             var users = Object.keys(v.share.users).map(function (u) {
                 return u + ': ' + (v.read_only ? 'read-only' : accessText(v.share.users[u]));
             }).join(', ');
@@ -406,7 +412,7 @@
         var point = v.mounted_at || v.mount_at || '';
         var inside = point.indexOf('/mnt/user/') === 0 ? point.split('/')[3] : '';
         if (v.share) {
-            var path = '\\\\' + window.location.hostname.toUpperCase() + '\\' + v.name;
+            var path = '\\\\' + smbName() + '\\' + v.name;
             var users = Object.keys(v.share.users).map(function (u) {
                 return u + ' ' + (v.read_only ? 'read-only' : accessText(v.share.users[u]));
             });
@@ -542,6 +548,7 @@
         return act({ action: 'list' }).then(function (a) {
             if (a.ok) {
                 if (a.settings) { httpsRequired = !!a.settings.require_https; }
+                if (a.server) { server = a.server; }
                 render(a.volumes || []);
             } else {
                 if ($('#vcm-rows').is('[data-compact]')) {
@@ -618,7 +625,7 @@
                 }
                 html += infoRow('Top folder', esc(a.top_folder.owner) + ', ' + esc(a.top_folder.mode) + actions);
             }
-            if (v.state === 'mounted' && v.size_bytes > 0) {
+            if (hasUsage(v)) {   // audit 2026-11-27c B5
                 html += infoRow('Usage', size(v.size_bytes - v.free_bytes) + ' used, ' + size(v.free_bytes) + ' free of ' + size(v.size_bytes));
             }
             html += infoRow('Share', v.share ? $('<div>').html(shareCell(v)).text().replace(/\s+/g, ' ') : 'not shared');
@@ -662,7 +669,8 @@
                           'This can break containers that need their own owners, such as databases. It cannot be undone.',
                     type: 'warning', html: true, showCancelButton: true, confirmButtonText: 'Fix permissions',
                     closeOnConfirm: false, showLoaderOnConfirm: true
-                }, function () {
+                }, function (yes) {
+                    if (!yes) { return; }   // audit 2026-11-27c B6
                     act({ action: 'fix-permissions', name: target }).then(function (f) {
                         message(f.ok ? 'Started' : 'Could not start', esc(f.ok ? f.message : f.error), f.ok ? 'success' : 'error');
                     });
@@ -724,6 +732,7 @@
     function freshHttpsSetting(next) {
         act({ action: 'list' }).then(function (a) {
             httpsRequired = a.ok && a.settings ? !!a.settings.require_https : true;
+            if (a.ok && Array.isArray(a.volumes)) { lastVolumes = a.volumes; }   // the newest list for the dialog
             next();
         });
     }
@@ -746,7 +755,6 @@
         var once = name === null;
         $('#vcm-mount-title').text(once ? 'Mount a file once' : 'Mount ' + name);
         $('#vcm-user').val(once ? '' : 'veracrypt:' + name);
-        $('#vcm-once-fields').prop('hidden', !once);
         $('#vcm-password').val('').attr('autocomplete', once ? 'off' : 'current-password');
         // KEY-2: what this volume needs besides the password.
         var v = null;
@@ -771,15 +779,17 @@
         $('#vcm-mount-error').prop('hidden', true).text('');
         $('#vcm-dialog-http').prop('hidden', !overHttp || blocked);
         $('#vcm-dialog-https').prop('hidden', !blocked);
-        // The host name without the HTTP port (audit B16): Unraid's HTTPS
-        // port is the default one unless it was changed.
-        $('#vcm-https-link').attr('href', 'https://' + window.location.hostname + window.location.pathname + window.location.search);
+        // The host name with Unraid's own HTTPS port, never the HTTP one
+        // (audit B16, 2026-11-27c B7).
+        var port = server && server.https_port && server.https_port !== 443 ? ':' + server.https_port : '';
+        $('#vcm-https-link').attr('href', 'https://' + window.location.hostname + port + window.location.pathname + window.location.search);
         $('#vcm-password-label').prop('hidden', blocked);
         $('#vcm-mount-submit').toggle(!blocked);
         $('#vcm-once-fields').prop('hidden', !once || blocked);
         $('#vcm-password').prop('disabled', blocked);
         $('#vcm-skip').prop('hidden', !inQueue);
         $('#vcm-mount-submit').prop('disabled', blocked).val('Mount');
+        $('#vcm-skip').prop('disabled', false);
         pimWarned = false;
         $('#vcm-pim-warn, #vcm-stop-other').prop('hidden', true);
         stopProgress();
@@ -795,6 +805,7 @@
         $('#vcm-password, #vcm-pim').val('');
         // "Mount a file once" leaves no trace in the page either (audit S10).
         $('#vcm-file, #vcm-name').val('');
+        autoOnceName = '';
         $('#vcm-keyfiles').empty();
         $('#vcm-modal').prop('hidden', true);
         mountTarget = null;
@@ -971,6 +982,7 @@
         stopProgress();
         $('#vcm-mount-error').text(text).prop('hidden', false);
         $('#vcm-mount-submit').prop('disabled', false).val('Mount');
+        $('#vcm-skip').prop('disabled', false);
     }
 
     function mounted(a) {
@@ -1009,7 +1021,7 @@
         var writers = Object.keys((v.share && v.share.users) || {}).filter(function (u) {
             return v.share.users[u] === 'read-write';
         });
-        var path = '\\\\' + window.location.hostname.toUpperCase() + '\\' + v.name;
+        var path = '\\\\' + smbName() + '\\' + v.name;
         swal({
             title: 'Allow writing over the network?',
             text: 'The share ' + esc(path) + ' gives ' + esc(writers.join(', ')) + ' write access, but the top folder of ' +
@@ -1084,6 +1096,7 @@
         if (overHttp && !httpChecked) {
             var id = checkingHttp = ++httpCheckSeq;
             $('#vcm-mount-submit').prop('disabled', true);
+            $('#vcm-skip').prop('disabled', true);
             freshHttpsSetting(function () {
                 if (checkingHttp !== id) { return; }
                 checkingHttp = 0;
@@ -1186,6 +1199,7 @@
         $('#vcm-mount-error').prop('hidden', true);
         mountLabel = once ? data.name : ((v && v.display_name) || mountTarget);
         $('#vcm-mount-submit').prop('disabled', true).val('Unlocking…');
+        $('#vcm-skip').prop('disabled', true);   // not while it unlocks (audit 2026-11-27c B1)
         startProgress(withPim);
 
         var name = data.name;
@@ -1255,39 +1269,39 @@
                 message('Could not dismount', esc(a.error), 'error');
                 return;
             }
-            // Busy: nothing was forced. Offer it, with a second confirmation (LIFE-5).
+            // Busy: nothing was forced. One dialog says what holds it, what
+            // forcing ends, and offers it (LIFE-5), as VeraCrypt itself does.
+            // Mounted inside a share (MNT-2): other containers given that
+            // share, and the computers using it, are affected too (audit
+            // 2026-11-27c S3).
+            var vol = lastVolumes.filter(function (x) { return x.name === name; })[0];
+            var inShare = !!(vol && vol.mount_at && vol.mount_at.indexOf('/mnt/user/') === 0);
             swal({
                 title: esc(name) + ' is still in use',
-                text: 'It stays mounted; nothing was forced.' + heldBy(a),
+                text: 'It stays mounted; nothing was forced.' + heldBy(a)
+                    + (a.details && a.details.restored ? '<br>' + esc(a.details.restored) : '')
+                    + '<br><br>Forcing ends these programs and stops containers that use the volume. Unsaved work in them is lost.'
+                    + (inShare ? ' It is mounted inside a share, so this can also stop other containers that use that share,'
+                        + ' and end the network connection of a computer that has a file open there.' : ''),
                 type: 'warning', html: true,
-                showCancelButton: true, confirmButtonText: 'Force dismount', closeOnConfirm: false
-            }, function () {
-                // Mounted inside a share (MNT-2): other containers given that
-                // share, and the computers using it, are affected too (audit
-                // 2026-11-27c S3).
-                var vol = lastVolumes.filter(function (x) { return x.name === name; })[0];
-                var inShare = !!(vol && vol.mount_at && vol.mount_at.indexOf('/mnt/user/') === 0);
-                swal({
-                    title: 'Force the dismount?',
-                    text: 'Programs that hold ' + esc(name) + ' open are ended, and containers that use it are stopped. Unsaved work in them is lost.'
-                        + (inShare ? '<br><br>It is mounted inside a share, so this can also stop other containers that use that share,'
-                            + ' and end the network connection of a computer that has a file open there.' : ''),
-                    type: 'warning', html: true,
-                    showCancelButton: true, confirmButtonText: 'Yes, force it', closeOnConfirm: false,
-                    showLoaderOnConfirm: true
-                }, function () {
-                    setDismounting([name], true);
-                    act({ action: 'dismount-force', name: name }).then(function (f) {
-                        setDismounting([name], false);
-                        refresh();
-                        if (f.ok) {
-                            message('Dismounted ' + esc(name), notesOf(f) || 'Done.', 'success');
-                        } else {
-                            message('Could not dismount', esc(f.error) + heldBy(f), 'error');
-                        }
-                    });
+                showCancelButton: true, confirmButtonText: 'Force dismount',
+                closeOnConfirm: false, showLoaderOnConfirm: true
+            }, function (yes) {
+                if (!yes) { return; }
+                setDismounting([name], true);
+                act({ action: 'dismount-force', name: name }).then(function (f) {
+                    setDismounting([name], false);
+                    refresh();
+                    if (f.ok) {
+                        message('Dismounted ' + esc(name), notesOf(f) || 'Done.', 'success');
+                    } else {
+                        message('Could not dismount', esc(f.error) + heldBy(f), 'error');
+                    }
                 });
             });
+            // Enter or a stray click on the spot of the last button must not
+            // force: the safe choice has the focus.
+            setTimeout(function () { $('.sweet-alert.visible button.cancel').trigger('focus'); }, 50);
         });
     }
 
@@ -1299,7 +1313,7 @@
             title: 'Dismount ' + esc(name) + '?',
             text: deps.length ? 'Its dependents are stopped first: ' + esc(deps.join(', ')) + '.' : 'Nothing is forced.',
             type: 'warning', html: true, showCancelButton: true, confirmButtonText: 'Dismount'
-        }, function () { dismount(name); });
+        }, function (yes) { if (yes) { dismount(name); } });
     }
 
     function dismountAll() {
@@ -1307,7 +1321,8 @@
             title: 'Dismount all volumes?',
             text: 'Their dependents are stopped first. Nothing is forced.',
             type: 'warning', showCancelButton: true, confirmButtonText: 'Dismount all', closeOnConfirm: false
-        }, function () {
+        }, function (yes) {
+            if (!yes) { return; }
             var names = lastVolumes.filter(function (v) { return v.state !== 'locked'; })
                                    .map(function (v) { return v.name; });
             setDismounting(names, true);
@@ -1425,9 +1440,16 @@
     function depsTime() {
         var total = 0;
         $('#e-deps .e-grace').each(function () { total += parseInt($(this).val(), 10) || 0; });
+        // The other volumes' dependents share the same time (audit 2026-11-27c B4).
+        var others = 0;
+        (config && config.volumes || []).forEach(function (x) {
+            if (x.name === editing) { return; }
+            (x.dependents || []).forEach(function (d) { others += Number(d.grace) || 0; });
+        });
         var budget = Math.max(20, Math.floor(((options && options.shutdown_timeout) || 90) / 2));
-        $('#e-deps-time').prop('hidden', total <= budget).text(
-            'Together these dependents may need ' + total + ' seconds to stop, but at shutdown or reboot '
+        $('#e-deps-time').prop('hidden', total === 0 || total + others <= budget).text(
+            (others ? 'With the dependents of your other volumes, all dependents together may need '
+                : 'Together these dependents may need ') + (total + others) + ' seconds to stop, but at shutdown or reboot '
             + 'there are only ' + budget + ' (half of Unraid\'s shutdown time-out, Settings › Disk Settings). '
             + 'The grace periods are then shortened to fit, and what still runs is stopped by Unraid with its '
             + 'own short limit. Shorten the grace periods, or raise the time-out.');
@@ -1733,6 +1755,9 @@
             config.volumes = volumes;
             markClean();
             checkPrivacy();
+            // A mounted volume's share follows the new settings at once, as
+            // the Edit panel says (audit 2026-11-27c, Part 3).
+            act({ action: 'repair-shares' });
             editError('');
             after();
         });
@@ -1769,7 +1794,8 @@
             title: 'Remove ' + esc(name) + ' from the list?',
             text: 'Only the entry is removed. The volume file itself is not touched.',
             type: 'warning', html: true, showCancelButton: true, confirmButtonText: 'Remove'
-        }, function () {
+        }, function (yes) {
+            if (!yes) { return; }
             save(config.volumes.filter(function (x) { return x.name !== name; }), closeEdit);
         });
     }
@@ -1820,7 +1846,10 @@
             } else if (mounting) { cancelUnlock(); return; }
             stopQueue(); closeDialog(); refresh();
         });
-        $('#vcm-skip').on('click', function () { closeDialog(true); nextInQueue(); });
+        $('#vcm-skip').on('click', function () {
+            if (mounting || checkingHttp) { return; }   // audit 2026-11-27c B1
+            closeDialog(true); nextInQueue();
+        });
         // Escape closes and Tab cycles inside the open dialog (audit B16.10).
         $(document).on('keydown', function (e) {
             if (!$('#vcm-modal').prop('hidden')) {
@@ -1921,14 +1950,16 @@
         // (the user may just have added the lines in File Activity).
         $('#vcm-privacy-copy').on('click', copyPrivacyLines);
         checkPrivacy();
-        document.addEventListener('visibilitychange', function () { if (!document.hidden) { checkPrivacy(); } });
 
         // Put shares in order once, quietly (U4), then show the list. The list
         // is not refreshed while the edit panel is open.
         act({ action: 'repair-shares' }).always(refresh);
         setInterval(function () { if (editing === null) { refresh(); } }, REFRESH);
+        // When the tab comes back: the list, and the File Activity check (PRIV-3).
         document.addEventListener('visibilitychange', function () {
-            if (!document.hidden && editing === null) { refresh(); }
+            if (document.hidden) { return; }
+            checkPrivacy();
+            if (editing === null) { refresh(); }
         });
     });
 }(jQuery));

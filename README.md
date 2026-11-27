@@ -124,6 +124,18 @@ reinstall picks it up again.
 Found a security problem? Please report it privately, as described in
 [`SECURITY.md`](SECURITY.md).
 
+## How it was made
+
+This is an AI-assisted project. I wrote the requirements and the design, decided every
+feature and every trade-off, reviewed every change before it went in, and tested every
+release on my own server with throwaway volumes.
+
+**Security first:** the password never touches a disk, a log or a command line, and the
+plugin does nothing risky without asking. The password path has been reviewed several
+times, including independent AI-assisted audits whose findings were fixed and are
+published in [`docs/`](docs/). There has been no professional third-party audit yet. If
+you find a problem, please report it privately ([`SECURITY.md`](SECURITY.md)).
+
 ## Development
 
 - `src/` mirrors the server's file system; `plugin/` holds the `.plg`.

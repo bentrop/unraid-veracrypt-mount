@@ -73,7 +73,7 @@ function vcm_same_file(string $one, string $two): bool
  */
 // #[\SensitiveParameter] (review H2): should PHP ever write a stack trace of
 // these functions, it shows a placeholder instead of the start of the password.
-function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $engine = VCM_ENGINE): array
+function vcm_handle(#[\SensitiveParameter] array &$post, bool $https, string $engine = VCM_ENGINE): array
 {
     $action = is_string($post['action'] ?? null) ? $post['action'] : '';
     $name = is_string($post['name'] ?? null) ? $post['name'] : '';
@@ -111,7 +111,11 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
             if (!is_string($unlock_id) || ($unlock_id !== '' && !preg_match(VCM_UNLOCK_ID, $unlock_id))) {
                 return vcm_refuse('That is not a valid unlock identifier.');
             }
+            // Taken out of the request, so this is the only copy (audit
+            // 2026-11-27c S6): $post is the caller's array, by reference.
             $password = $post['password'] ?? null;
+            $pim = $post['pim'] ?? '';
+            unset($post['password'], $post['pim']);
             // VeraCrypt allows a volume with keyfiles and no password. The page
             // says so with no_password=1, only when keyfiles are used.
             $no_password = ($post['no_password'] ?? '') === '1';
@@ -129,7 +133,6 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
             }
             // The PIM, if the volume has one: digits only, sent after the
             // password on the engine's standard input (SEC-1), never as an argument.
-            $pim = $post['pim'] ?? '';
             if (!is_string($pim) || ($pim !== '' && !preg_match(VCM_PIM, $pim))) {
                 return vcm_refuse('The PIM must be a whole number from 1 upwards, without spaces.');
             }
@@ -138,7 +141,7 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
                 // so a missing or unexpected PIM or an empty password without
                 // keyfiles is refused before the password leaves PHP (review K4,
                 // audit S11, B17.1). The engine checks the same flags again.
-                $status = vcm_run($engine, ['status', $name, '--json'], null);
+                $status = vcm_run($engine, ['status', $name, '--json']);
                 $saved = is_array($status['volume'] ?? null) ? $status['volume'] : null;
                 if ($saved !== null && !empty($saved['pim']) && $pim === '') {
                     return vcm_refuse('This volume asks for a PIM. Enter it.');
@@ -258,7 +261,7 @@ function vcm_handle(#[\SensitiveParameter] array $post, bool $https, string $eng
 
     $args[] = '--json';
     $answer = vcm_run($engine, $args, $stdin);
-    unset($stdin);
+    $stdin = null;   // vcm_run() has already cleared it through the reference
     return $answer;
 }
 
@@ -296,7 +299,7 @@ function vcm_refuse(string $message): array
  * answering cannot hold this web request. If the engine ends early (for
  * example a refused save), the rest of the input is dropped quietly.
  */
-function vcm_run(string $engine, array $args, #[\SensitiveParameter] ?string $stdin): array
+function vcm_run(string $engine, array $args, #[\SensitiveParameter] ?string &$stdin = null): array
 {
     $command = array_merge(['/usr/bin/php', $engine], $args);
     $spec = [
@@ -328,7 +331,7 @@ function vcm_run(string $engine, array $args, #[\SensitiveParameter] ?string $st
             if ($input !== null) {
                 fclose($input);
             }
-            unset($stdin);
+            $stdin = null;   // through the reference, the caller's copy too (audit 2026-11-27c S6)
             fclose($pipes[1]);
             vcm_stop($process);
             // It may have done part of the work (mounted, but not all
@@ -365,7 +368,7 @@ function vcm_run(string $engine, array $args, #[\SensitiveParameter] ?string $st
     if ($input !== null) {
         fclose($input);
     }
-    unset($stdin);
+    $stdin = null;   // through the reference, the caller's copy too (audit 2026-11-27c S6)
     fclose($pipes[1]);
     $code = proc_close($process);
 

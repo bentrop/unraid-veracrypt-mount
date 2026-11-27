@@ -77,7 +77,8 @@ function finish(): void
     step('Clean up');
     if (!is_locked()) {
         echo '"' . NAME . "\" is not locked; trying one normal dismount\n";
-        vcm_handle(['action' => 'dismount', 'name' => NAME], false, ENGINE);
+        $post = ['action' => 'dismount', 'name' => NAME];
+        vcm_handle($post, false, ENGINE);
         check(is_locked(), 'now locked');
     }
     @unlink(CONFIG);
