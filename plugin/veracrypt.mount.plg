@@ -127,7 +127,7 @@ if [ -e "$1" ]; then
   echo "Not removed: $# volume(s) still unlocked or mounted. Dismount all volumes first (Dismount all on the Volumes tab), then remove the plugin again."
   exit 1
 fi
-if [ -x "$E" ] &amp;&amp; "$E" busy 2&gt;/dev/null | grep -q "is running"; then
+if [ -x "$E" ] &amp;&amp; "$E" busy --json 2&gt;/dev/null | grep -q "\"busy\":true"; then
   echo "Not removed: a vcmount action is still running. Wait a moment and remove the plugin again."
   exit 1
 fi
