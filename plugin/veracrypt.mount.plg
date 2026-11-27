@@ -2,8 +2,8 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "veracrypt.mount">
 <!ENTITY author    "bentrop">
-<!ENTITY version   "2026.11.27v">
-<!ENTITY sha256    "23d80c4ef4bb1fd9b283bfd1351c647144da3edcaf07d2c242f8e9fbde359d93">
+<!ENTITY version   "2026.11.27w">
+<!ENTITY sha256    "e707ab05fd62d02ea65ba6bd2610532293b16f0f67f9c182517089268511f828">
 <!ENTITY launch    "Settings/VeraCryptMount">
 <!ENTITY gitURL    "https://github.com/bentrop/unraid-veracrypt-mount">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/bentrop/unraid-veracrypt-mount/main/plugin/&name;.plg">
@@ -23,7 +23,7 @@ removepkg, so every file it brings is also taken away again.
 <CHANGES>
 ##VeraCrypt Mount
 
-###2026.11.27v
+###2026.11.27w
 - First public release (beta). Mount VeraCrypt and TrueCrypt volumes with the cryptsetup Unraid already has: password, PIM, keyfiles, hidden volumes; FAT, exFAT, NTFS, ext4, XFS and Btrfs inside.
 - Per-user SMB shares, dependent containers that start and stop with their volume, lock when idle, Dashboard tile and Main page section, the vcmount command for SSH.
 - Safe dismount at array stop and shutdown; a normal dismount never takes a volume from a program or a computer that still uses it.
